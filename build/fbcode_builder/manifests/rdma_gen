@@ -1,0 +1,48 @@
+[manifest]
+name = rdma_gen
+fbsource_path = fbcode/neteng/ai/rdma_gen
+shipit_project = facebookexternal/rdma_gen
+use_shipit = true
+
+[build]
+builder = cmake
+job_weight_mib = 1024
+subdir = .
+
+[build.os=windows]
+builder = nop
+
+[dependencies.os=darwin]
+openssl
+
+[cmake.defines.test=on]
+BUILD_TESTS = ON
+
+[cmake.defines.test=off]
+BUILD_TESTS = OFF
+
+[dependencies]
+folly
+fast_float
+re2
+fbthrift
+wangle
+libibverbs
+bz2
+xz
+gflags
+glog
+
+[dependencies.all(test=on, not(os=windows))]
+googletest
+glog
+
+[rpms.all(distro=centos_stream,distro_vers=9)]
+gcc-toolset-14-gcc-c++
+
+[cmake.defines.all(distro=centos_stream,distro_vers=9)]
+CMAKE_C_COMPILER=/opt/rh/gcc-toolset-14/root/usr/bin/gcc
+CMAKE_CXX_COMPILER=/opt/rh/gcc-toolset-14/root/usr/bin/g++
+
+[shipit.pathmap]
+fbcode/neteng/ai/rdma_gen = .
