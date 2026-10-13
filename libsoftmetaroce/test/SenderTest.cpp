@@ -453,8 +453,10 @@ TEST_P(SenderTest, SendNFrames) {
   // these initial sequence number values.
   const uint16_t msn = 2;
   const uint16_t csn = 1;
-  qp->getTag(kMetaRoceInitialTag)->setNextMsn(msn);
-  qp->getTag(kMetaRoceInitialTag)->setNextCsn(csn);
+  ASSERT_TRUE(qp->getTag(kMetaRoceInitialTag)->setNextMsn(msn))
+      << "precondition: the send must start from the test sequence numbers";
+  ASSERT_TRUE(qp->getTag(kMetaRoceInitialTag)->setNextCsn(csn))
+      << "precondition: the send must start from the test sequence numbers";
   auto flow = qp->getTxFlowById(flowId);
 
   const uint32_t length = frames * qp->getMtu();

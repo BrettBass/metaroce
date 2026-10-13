@@ -616,9 +616,12 @@ TEST_F(TaggedVerbsTest, TagStateManagementAndIsolation) {
 
   // Set different MSN for different Tags, which a tag takes only while it
   // cannot yet send.
-  tag0->setNextMsn(100);
-  tag1->setNextMsn(200);
-  tag2->setNextMsn(300);
+  ASSERT_TRUE(tag0->setNextMsn(100))
+      << "precondition: each tag must accept its independent send numbering";
+  ASSERT_TRUE(tag1->setNextMsn(200))
+      << "precondition: each tag must accept its independent send numbering";
+  ASSERT_TRUE(tag2->setNextMsn(300))
+      << "precondition: each tag must accept its independent send numbering";
 
   init_attr.qp_state = IBV_QPS_RTR;
   verbs_.ibv_modify_qp(qp_tag0, &init_attr, IBV_QP_STATE);
@@ -784,12 +787,14 @@ TEST_F(TaggedVerbsTest, TagSequenceNumberIsolation) {
 
   // Advance MSN for Tag 0. A tag takes its numbering only while it cannot yet
   // send, and the tags reach RTS together, so both are numbered first.
-  tag0->setNextMsn(100);
+  ASSERT_TRUE(tag0->setNextMsn(100))
+      << "precondition: each tag must accept its independent send numbering";
   EXPECT_EQ(tag0->getNextMsn(), 100);
   EXPECT_NE(tag1->getNextMsn(), 100); // Tag 1 should be different
 
   // Advance MSN for Tag 1
-  tag1->setNextMsn(200);
+  ASSERT_TRUE(tag1->setNextMsn(200))
+      << "precondition: each tag must accept its independent send numbering";
   EXPECT_EQ(tag0->getNextMsn(), 100); // Tag 0 unchanged
   EXPECT_EQ(tag1->getNextMsn(), 200); // Tag 1 updated
 

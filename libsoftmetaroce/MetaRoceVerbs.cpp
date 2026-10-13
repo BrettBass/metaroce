@@ -1601,16 +1601,15 @@ int MetaRoceVerbs::ibv_modify_qp(
     qp->setRemoteQpNum(attr->dest_qp_num);
     tagConfig.remoteQpNum = attr->dest_qp_num;
   }
-  // All guards below read this one state, so a mid-batch error cannot split
-  // validation across two states; the transition commits at the end.
   const ibv_qp_state state = loadQpState(*ibvqp);
   if (attr_mask & IBV_QP_SQ_PSN) {
     // sq_psn is expected only on RTR -> RTS.
     if (!isBeforeRts(state)) {
       return withErrno(EINVAL);
     }
-    if (!FLAGS_libsoftmetaroce_ignore_modify_psn) {
-      tag->setSendSequenceNumbers(SequenceNumbers::fromPsn(attr->sq_psn));
+    if (!FLAGS_libsoftmetaroce_ignore_modify_psn &&
+        !tag->setSendSequenceNumbers(SequenceNumbers::fromPsn(attr->sq_psn))) {
+      return withErrno(EINVAL);
     }
     tagConfig.sendCsn = tag->getNextCsn();
     tagConfig.sendMsn = tag->getNextMsn();

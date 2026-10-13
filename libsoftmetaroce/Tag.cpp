@@ -126,17 +126,17 @@ void Tag::releaseCompletionQueueReferences() {
   return msnSpan_.rlock()->nextMsn;
 }
 
-void Tag::setNextMsn(uint16_t v) {
-  const ibv_qp_state state = loadQpState(ibvQp_);
-  CHECK(isBeforeRts(state))
-      << "May not renumber the transmit msn once the queue pair can send; its "
-      << "ibv_qp is " << qpStateToString(state);
+bool Tag::setNextMsn(uint16_t v) {
+  if (!isBeforeRts(loadQpState(ibvQp_))) {
+    return false;
+  }
   auto lockedSpan = msnSpan_.wlock();
   CHECK(lockedSpan->wqes.empty())
       << "renumbering builds a fresh span, so work already keyed by the old "
       << "msns would be dropped without completing; the tag holds "
       << lockedSpan->wqes.size();
   *lockedSpan = MsnSpan(v);
+  return true;
 }
 
 [[nodiscard]] uint16_t Tag::getAndIncrementNextMsn() {
@@ -151,12 +151,12 @@ void Tag::setNextMsn(uint16_t v) {
   return nextCsn_;
 }
 
-void Tag::setNextCsn(uint16_t v) {
-  const ibv_qp_state state = loadQpState(ibvQp_);
-  CHECK(isBeforeRts(state))
-      << "May not renumber the transmit csn once the queue pair can send; its "
-      << "ibv_qp is " << qpStateToString(state);
+bool Tag::setNextCsn(uint16_t v) {
+  if (!isBeforeRts(loadQpState(ibvQp_))) {
+    return false;
+  }
   nextCsn_ = v;
+  return true;
 }
 
 [[nodiscard]] uint16_t Tag::getAndIncrementNextRxCsn() {
@@ -171,9 +171,18 @@ void Tag::setNextCsn(uint16_t v) {
   return receiveSequence_.cumulativeDelivered();
 }
 
-void Tag::setSendSequenceNumbers(SequenceNumbers numbering) {
-  setNextMsn(numbering.nextMsn);
-  setNextCsn(numbering.nextCsn);
+bool Tag::setSendSequenceNumbers(SequenceNumbers numbering) {
+  auto lockedSpan = msnSpan_.wlock();
+  if (!isBeforeRts(loadQpState(ibvQp_))) {
+    return false;
+  }
+  CHECK(lockedSpan->wqes.empty())
+      << "renumbering builds a fresh span, so work already keyed by the old "
+      << "msns would be dropped without completing; the tag holds "
+      << lockedSpan->wqes.size();
+  *lockedSpan = MsnSpan(numbering.nextMsn);
+  nextCsn_ = numbering.nextCsn;
+  return true;
 }
 
 bool Tag::setReceiveSequenceNumbers(SequenceNumbers numbering) {

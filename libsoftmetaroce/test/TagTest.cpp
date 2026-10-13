@@ -131,7 +131,8 @@ class TagTest : public ::testing::Test {
   // A tag takes its msn only before RTS.
   void numberTransmitFrom(uint16_t msn) {
     const QpStateGuard inRtr{ibvQpStorage_, IBV_QPS_RTR};
-    tag_->setNextMsn(msn);
+    EXPECT_TRUE(tag_->setNextMsn(msn))
+        << "precondition: the transmit cases must accept their starting msn";
   }
 
   void TearDown() override {
@@ -1398,6 +1399,60 @@ TEST_F(TagTest, ABadRkeyWriteReportsItsReceiveBehindEarlierReceives) {
       << "the consumed receive reports behind the one posted before it";
   EXPECT_EQ(second.status, kLocalProtErr)
       << "it must keep the protection error rather than reporting a flush";
+}
+
+TEST_F(TagTest, SendSequenceNumbersAcceptPreRtsStates) {
+  SequenceNumbers numbering{.nextMsn = 100, .nextCsn = 200};
+  for (const auto state : {IBV_QPS_RESET, IBV_QPS_INIT, IBV_QPS_RTR}) {
+    SCOPED_TRACE(qpStateToString(state));
+    const QpStateGuard beforeRts{ibvQpStorage_, state};
+    ASSERT_TRUE(tag_->setSendSequenceNumbers(numbering))
+        << "send numbering must remain configurable before RTS";
+    EXPECT_EQ(tag_->getNextMsn(), numbering.nextMsn)
+        << "the next send must use the MSN supplied during setup";
+    EXPECT_EQ(tag_->getNextCsn(), numbering.nextCsn)
+        << "send completions must use the CSN supplied during setup";
+    ++numbering.nextMsn;
+    ++numbering.nextCsn;
+  }
+}
+
+TEST_F(TagTest, SendSequenceNumbersRejectRts) {
+  {
+    const QpStateGuard inRtr{ibvQpStorage_, IBV_QPS_RTR};
+    ASSERT_TRUE(tag_->setSendSequenceNumbers({.nextMsn = 100, .nextCsn = 200}))
+        << "precondition: the tag must have numbering to preserve on refusal";
+  }
+  const QpStateGuard inRts{ibvQpStorage_, IBV_QPS_RTS};
+  EXPECT_FALSE(tag_->setSendSequenceNumbers({.nextMsn = 300, .nextCsn = 400}))
+      << "a tag that can already send must refuse renumbering rather than "
+         "change numbers its peer is tracking";
+  EXPECT_EQ(tag_->getNextMsn(), 100)
+      << "a refused renumbering must leave the message numbering in place";
+  EXPECT_EQ(tag_->getNextCsn(), 200)
+      << "a refused renumbering must leave the completion numbering in place";
+}
+
+TEST_F(TagTest, SendSequenceNumbersRejectErrorAfterValidation) {
+  const QpStateGuard inRtr{ibvQpStorage_, IBV_QPS_RTR};
+  ASSERT_TRUE(tag_->setSendSequenceNumbers({.nextMsn = 100, .nextCsn = 200}))
+      << "precondition: the tag must have numbering to preserve on refusal";
+  ASSERT_TRUE(isBeforeRts(loadQpState(ibvQpStorage_)))
+      << "precondition: an initial state check must permit send numbering";
+
+  storeQpErrorState(ibvQpStorage_);
+  EXPECT_FALSE(tag_->setSendSequenceNumbers({.nextMsn = 300, .nextCsn = 400}))
+      << "an error after state validation must refuse renumbering without aborting";
+  EXPECT_FALSE(tag_->setNextMsn(300))
+      << "the msn setter must report a concurrent error as a refusal";
+  EXPECT_FALSE(tag_->setNextCsn(400))
+      << "the csn setter must report a concurrent error as a refusal";
+  EXPECT_EQ(tag_->getNextMsn(), 100)
+      << "an errored tag must retain its message numbering";
+  EXPECT_EQ(tag_->getNextCsn(), 200)
+      << "an errored tag must retain its completion numbering";
+  EXPECT_EQ(loadQpState(ibvQpStorage_), IBV_QPS_ERR)
+      << "a renumbering refusal must leave the tag in its terminal error state";
 }
 
 // Test edge case: CSN/MSN sequence enforcement

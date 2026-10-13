@@ -106,15 +106,16 @@ class Tag {
     return receiveQueueDepth_;
   }
   [[nodiscard]] uint16_t getNextMsn() const;
-  void setNextMsn(uint16_t v);
+  [[nodiscard]] bool setNextMsn(uint16_t v);
   [[nodiscard]] uint16_t getAndIncrementNextMsn();
   [[nodiscard]] uint16_t getAndIncrementNextCsn();
   [[nodiscard]] uint16_t getNextCsn() const;
-  void setNextCsn(uint16_t v);
+  [[nodiscard]] bool setNextCsn(uint16_t v);
   [[nodiscard]] uint16_t getNextRxCsn() const;
   [[nodiscard]] uint16_t getCDMSN() const;
-  // Fatal once the tag can already send, which is too late to renumber it.
-  void setSendSequenceNumbers(SequenceNumbers numbering);
+  // Returns false outside RESET, INIT, or RTR, leaving send numbering
+  // unchanged.
+  [[nodiscard]] bool setSendSequenceNumbers(SequenceNumbers numbering);
   // False once the tag can already receive, which is too late to renumber it.
   [[nodiscard]] bool setReceiveSequenceNumbers(SequenceNumbers numbering);
   [[nodiscard]] uint16_t getTxCompletedMsn() const;
