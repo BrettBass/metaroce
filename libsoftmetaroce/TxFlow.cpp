@@ -1414,6 +1414,8 @@ std::string_view toStringView(SackRetransmissionMode mode) {
     case SackRetransmissionMode::DISTANCE_BASED_PWND:
       return "distance_based_pwnd";
   }
+  // unreachable; satisfies -Wreturn-type
+  LOG(FATAL) << "unhandled SackRetransmissionMode: " << static_cast<int>(mode);
 }
 
 uint16_t TxFlow::countSackedPackets(uint16_t sndCur) const {
@@ -1441,6 +1443,9 @@ bool TxFlow::isAllowedToFastRetransmit(uint16_t sndCur) const {
           fwnd * sackRetxConfig_.fraction;
     }
   }
+  // unreachable; satisfies -Wreturn-type
+  LOG(FATAL) << "unhandled SackRetransmissionMode: "
+             << static_cast<int>(sackRetxConfig_.mode);
 }
 
 uint16_t TxFlow::sackRetxCursorLimit() const {
@@ -1479,6 +1484,9 @@ uint16_t TxFlow::sackRetxCursorLimit() const {
       return cursorLimit;
     }
   }
+  // unreachable; satisfies -Wreturn-type
+  LOG(FATAL) << "unhandled SackRetransmissionMode: "
+             << static_cast<int>(sackRetxConfig_.mode);
 }
 
 [[nodiscard]] uint32_t TxFlow::computeRttNs(

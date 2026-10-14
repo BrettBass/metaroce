@@ -35,6 +35,7 @@
 #include <libsoftmetaroce/test/TxTimerSuppressor.h>
 #include <atomic>
 #include <chrono>
+#include <random>
 #include <thread>
 
 DECLARE_bool(libsoftmetaroce_slow_receiver);
@@ -5172,7 +5173,8 @@ TEST_F(QpTest, ManyWritesUnorderedArrivalOrderedCompletion) {
     msnsList[i] = i + initialTag->getNextMsn();
   }
   auto lastMsn = 99 + initialTag->getNextMsn();
-  std::random_shuffle(msnsList.begin(), msnsList.end());
+  std::mt19937 rng(0);
+  std::shuffle(msnsList.begin(), msnsList.end(), rng);
   int addressError{0};
   for (int i = 0; i < 100; ++i) {
     const auto msn = msnsList[i];

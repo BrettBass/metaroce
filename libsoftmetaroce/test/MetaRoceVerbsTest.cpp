@@ -1554,7 +1554,12 @@ TEST(MetaRoceVerbsTest, NextFreeIdFailsWhenEveryNumberInUse) {
  * readModifierConfigFile()
  */
 TEST(MetaRoceVerbsTest, ReadModifierConfig) {
-  const auto tmpFile = std::tmpnam(nullptr);
+  char tmpl[] = "/tmp/modifier_config_testXXXXXX";
+  int fd = mkstemp(tmpl);
+  ASSERT_NE(fd, -1)
+      << "precondition: unique temp path for the config round-trip";
+  close(fd);
+  const std::string tmpFile = tmpl;
 
   std::ofstream writer(tmpFile);
   ASSERT_TRUE(writer.is_open()) << "Failed to open the file for writing";

@@ -143,8 +143,7 @@ class Baseline : public FastStart {
     }
     // compute integer and fractional reduction if multiple ce packets acked.
     int reduction = signal >> shift;
-    uint32_t fractional_reduction =
-        (qwnd_ >> shift) * (signal & ((1 << shift) - 1));
+    int fractional_reduction = (qwnd_ >> shift) * (signal & ((1 << shift) - 1));
 
     // apply at least a small reaction even if shift is very small
     if (reduction == 0 && fractional_reduction == 0) {
