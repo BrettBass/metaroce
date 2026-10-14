@@ -20,6 +20,7 @@
 #include <folly/Utility.h>
 #include <folly/io/async/AsyncUDPSocket.h>
 #include <folly/io/async/EventBase.h>
+#include <libsoftmetaroce/Constants.h>
 #include <libsoftmetaroce/Ecn.h>
 #include <libsoftmetaroce/PacketModifierSocket.h>
 #include <libsoftmetaroce/Qp.h>
@@ -39,8 +40,7 @@ namespace libsoftmetaroce {
 
 class PingController;
 
-inline constexpr uint8_t kHrnrBackoffTimeExp =
-    10 & 0x1f; // Requested backoff is 5*2^10 usec = 5.120ms
+inline constexpr uint8_t kHrnrBackoffTimeExp = kDefaultRnrBackoffTimeExp;
 
 class Receiver : public PacketModifierSocket::ReadCallback,
                  public folly::NonCopyableNonMovable {

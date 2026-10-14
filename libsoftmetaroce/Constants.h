@@ -182,6 +182,10 @@ inline constexpr uint8_t kMtuEnumShift = 7;
 // Base time unit (microseconds) for RNR backoff: backoff_us = kRnrBackoffBaseUs
 // << exponent.
 inline constexpr uint32_t kRnrBackoffBaseUs = 5;
+// This is stored as the number of times to left-shift 5 usec, which here is 10.
+// 0x1f is a mask to restrict this to the five least significant bits.
+// Requested backoff is 5*2^10 usec = 5.120ms
+inline constexpr uint8_t kDefaultRnrBackoffTimeExp = 10 & 0x1f;
 
 // --- Atomic Operations ---
 // All atomic operations (fetch-add, compare-swap) operate on exactly this many
