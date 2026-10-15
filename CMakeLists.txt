@@ -273,6 +273,11 @@ add_fbthrift_cpp_library(
   json
   stack_arguments)
 
+# The generated gen-cpp2 sources call deprecated thrift and folly APIs
+# while fbthrift migrates its codegen; the warnings are not actionable
+# here, so silence them on this generated-only target.
+target_compile_options(rdma_info_thrift PRIVATE -Wno-deprecated-declarations)
+
 # rdma_gen_lib links softmetaroce instead of compiling the libsoftmetaroce
 # sources itself; the leaf owns that list (LSMR_LIB_SRCS), so the two can
 # never drift and test builds compile each source once.
