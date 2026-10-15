@@ -98,6 +98,15 @@ foreach(SUITE_SRC ${LSMR_RDMA_UNIT_SUITE_SRCS})
     APPEND LSMR_RDMA_UNIT_SUITE_ABS_SRCS
     "${rdma_unit_test_SOURCE_DIR}/${SUITE_SRC}")
 endforeach()
+
+# The suite is pinned upstream Google code, fetched, not written here: its
+# absl::MutexLock(pointer) calls predate the reference-only deprecation in
+# the pinned absl, and three mw_test.cc helpers fall off the end. Silence
+# both warning classes on the fetched sources only; the shims below keep
+# the default warnings.
+set_source_files_properties(
+  ${LSMR_RDMA_UNIT_SUITE_ABS_SRCS}
+  PROPERTIES COMPILE_OPTIONS "-Wno-deprecated-declarations;-Wno-return-type")
 add_executable(
   lsmr_run_unit_test ${LSMR_RDMA_UNIT_SUITE_ABS_SRCS} lsmr_ibv_shim.cpp
   lsmr_gunit_main.cc)
