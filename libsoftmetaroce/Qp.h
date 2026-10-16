@@ -71,8 +71,6 @@ DECLARE_uint32(libsoftmetaroce_initial_est_rtt_us);
 
 namespace libsoftmetaroce {
 
-inline constexpr size_t kMaxPorts = 8;
-
 // For validation, we bind to the port configured by
 // libsoftmetaroce_bind_to_port but also listen on kMetaRoceBindToPortAlternate.
 inline constexpr uint16_t kMetaRoceBindToPortAlternate = 64206;

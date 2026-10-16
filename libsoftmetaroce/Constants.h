@@ -199,6 +199,8 @@ inline constexpr uint32_t kGidTypeMetaRoceUdp =
     2; // equal to IBV_GID_TYPE_ROCE_V2
 inline constexpr uint32_t kGidTypeMetaRoceEthernet = 100;
 
+inline constexpr size_t kMaxPorts = 16;
+
 // A tag number is a uint8_t, so this bounds any per-tag set.
 inline constexpr size_t kMetaRoceTagCount = 256;
 
