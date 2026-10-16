@@ -35,6 +35,25 @@ namespace libsoftmetaroce {
 struct RegisteredMemoryRegion {
   struct ibv_mr mr;
   int access;
+
+  [[nodiscard]] bool isZeroBased() const {
+    return (access & IBV_ACCESS_ZERO_BASED) != 0;
+  }
+  [[nodiscard]] uint64_t baseAddress() const {
+    return reinterpret_cast<uint64_t>(mr.addr);
+  }
+  // Registration gives a region one key, as both its lkey and its rkey.
+  [[nodiscard]] uint32_t key() const {
+    return mr.rkey;
+  }
+  // Converts an address or zero-based offset to a virtual address.
+  // Returns empty on overflow; range and permission checks are separate.
+  [[nodiscard]] std::optional<uint64_t> resolvedAddress(
+      uint64_t addressOrOffset) const;
+  // Whether the region covers length bytes at address and grants
+  // requiredAccess.
+  [[nodiscard]] bool
+  permits(uint64_t address, uint32_t length, int requiredAccess) const;
 };
 
 using MemoryRegionsMap =

@@ -42,53 +42,49 @@ const RegisteredMemoryRegion* FOLLY_NULLABLE regionUnder(
   return it->second.get();
 }
 
-// A zero-based region is addressed from its own base, so the wire value is an
-// offset into it. An offset that overflows when added to the base resolves
-// to no address.
-std::optional<uint64_t> resolvedFromWire(
-    const RegisteredMemoryRegion& region,
-    uint64_t addr) {
-  if ((region.access & IBV_ACCESS_ZERO_BASED) == 0) {
-    return addr;
+} // namespace
+
+std::optional<uint64_t> RegisteredMemoryRegion::resolvedAddress(
+    uint64_t addressOrOffset) const {
+  if (!isZeroBased()) {
+    return addressOrOffset;
   }
-  const auto base = reinterpret_cast<uint64_t>(region.mr.addr);
-  if (addr > std::numeric_limits<uint64_t>::max() - base) {
+  const uint64_t offset = addressOrOffset;
+  const uint64_t base = baseAddress();
+  const bool offsetWrapsPastTheTop =
+      offset > std::numeric_limits<uint64_t>::max() - base;
+  if (offsetWrapsPastTheTop) {
     LOG(ERROR) << "Memory region resolution failed zero-based check. key:"
-               << region.mr.rkey << " offset:" << std::hex << addr
-               << " cannot be added to base " << region.mr.addr << std::dec;
+               << key() << " offset:" << std::hex << offset
+               << " cannot be added to base " << mr.addr << std::dec;
     return std::nullopt;
   }
-  return base + addr;
+  return base + offset;
 }
 
-bool regionPermits(
-    const RegisteredMemoryRegion& region,
-    uint32_t key,
+bool RegisteredMemoryRegion::permits(
     uint64_t address,
     uint32_t length,
-    int requiredAccess) {
-  const auto base = reinterpret_cast<uint64_t>(region.mr.addr);
+    int requiredAccess) const {
+  const uint64_t base = baseAddress();
   // The length comes off the region end, so an address near the top of the
   // space cannot wrap past it into the region.
-  if (address < base || length > region.mr.length ||
-      address > base + (region.mr.length - length)) {
-    LOG(ERROR) << "Memory region validation failed range check. key:" << key
+  if (address < base || length > mr.length ||
+      address > base + (mr.length - length)) {
+    LOG(ERROR) << "Memory region validation failed range check. key:" << key()
                << " destination addr:" << std::hex << address
                << " length:" << std::dec << length << " while range is "
-               << std::hex << region.mr.addr << " len:" << std::dec
-               << region.mr.length;
+               << std::hex << mr.addr << " len:" << std::dec << mr.length;
     return false;
   }
-  if ((region.access & requiredAccess) != requiredAccess) {
-    LOG(ERROR) << "Memory region validation failed access check. key:" << key
+  if ((access & requiredAccess) != requiredAccess) {
+    LOG(ERROR) << "Memory region validation failed access check. key:" << key()
                << " needs access 0x" << std::hex << requiredAccess
-               << " but is registered with 0x" << region.access << std::dec;
+               << " but is registered with 0x" << access << std::dec;
     return false;
   }
   return true;
 }
-
-} // namespace
 
 MemoryRegions::RemoteAtomicTarget MemoryRegions::targetForRemoteAtomic(
     const struct ibv_pd* pd,
@@ -99,18 +95,14 @@ MemoryRegions::RemoteAtomicTarget MemoryRegions::targetForRemoteAtomic(
   if (region == nullptr) {
     return {.address = addr, .permitted = false};
   }
-  const auto resolved = resolvedFromWire(*region, addr);
+  const auto resolved = region->resolvedAddress(addr);
   if (!resolved.has_value()) {
     return {.address = addr, .permitted = false};
   }
   return {
       .address = *resolved,
-      .permitted = regionPermits(
-          *region,
-          rkey,
-          *resolved,
-          kAtomicOperationSizeBytes,
-          IBV_ACCESS_REMOTE_ATOMIC)};
+      .permitted = region->permits(
+          *resolved, kAtomicOperationSizeBytes, IBV_ACCESS_REMOTE_ATOMIC)};
 }
 
 bool MemoryRegions::isValidLocal(
@@ -146,10 +138,10 @@ std::optional<uint64_t> MemoryRegions::checkedAddress(
     return std::nullopt;
   }
   const std::optional<uint64_t> resolved = kind == AddressKind::FromTheWire
-      ? resolvedFromWire(*region, addr)
+      ? region->resolvedAddress(addr)
       : std::optional<uint64_t>{addr};
   if (!resolved.has_value() ||
-      !regionPermits(*region, key, *resolved, length, requiredAccess)) {
+      !region->permits(*resolved, length, requiredAccess)) {
     return std::nullopt;
   }
   return resolved;
