@@ -305,22 +305,36 @@ set_target_properties(rdma_gen PROPERTIES
 target_link_libraries(rdma_gen rdma_gen_lib)
 install(TARGETS rdma_gen)
 
-if(LSMR_BUILD_SAMPLES AND NOT EXISTS
-   "${CMAKE_CURRENT_SOURCE_DIR}/libsoftmetaroce/samples/CMakeLists.txt")
-  message(
-    FATAL_ERROR
-      "LSMR_BUILD_SAMPLES is on but "
-      "libsoftmetaroce/samples/CMakeLists.txt is absent; "
-      "the export is missing the samples tree.")
-endif()
-
-if(LSMR_BUILD_RDMA_UNIT AND NOT EXISTS
-   "${CMAKE_CURRENT_SOURCE_DIR}/libsoftmetaroce/test/rdma-unit/CMakeLists.txt")
-  message(
-    FATAL_ERROR
-      "LSMR_BUILD_RDMA_UNIT is on but "
-      "libsoftmetaroce/test/rdma-unit/CMakeLists.txt is absent; "
-      "the export is missing the conformance tree.")
+# Leaf tests for OSS CI. getdeps passes -DBUILD_TESTS=ON for the test variant
+# (see build/fbcode_builder/manifests/metaroce); a plain configure leaves it
+# off and builds only rdma_gen. Strict by design: when tests are requested,
+# the leaf test tree must be present, so a partial export fails configure
+# loudly instead of running zero tests.
+option(BUILD_TESTS "Build the libsoftmetaroce leaf tests" OFF)
+if(BUILD_TESTS)
+  enable_testing()
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/libsoftmetaroce/test/CMakeLists.txt")
+    message(
+      FATAL_ERROR
+        "BUILD_TESTS is on but libsoftmetaroce/test/CMakeLists.txt is absent; "
+        "the export is missing the leaf test tree.")
+  endif()
+  if(LSMR_BUILD_SAMPLES AND NOT EXISTS
+     "${CMAKE_CURRENT_SOURCE_DIR}/libsoftmetaroce/samples/CMakeLists.txt")
+    message(
+      FATAL_ERROR
+        "LSMR_BUILD_SAMPLES is on but "
+        "libsoftmetaroce/samples/CMakeLists.txt is absent; "
+        "the export is missing the samples tree.")
+  endif()
+  if(LSMR_BUILD_RDMA_UNIT AND NOT EXISTS
+     "${CMAKE_CURRENT_SOURCE_DIR}/libsoftmetaroce/test/rdma-unit/CMakeLists.txt")
+    message(
+      FATAL_ERROR
+        "LSMR_BUILD_RDMA_UNIT is on but "
+        "libsoftmetaroce/test/rdma-unit/CMakeLists.txt is absent; "
+        "the export is missing the conformance tree.")
+  endif()
 endif()
 
 if(LSMR_BUILD_PRELOAD AND NOT EXISTS

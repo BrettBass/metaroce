@@ -14,5 +14,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-cp getdeps/rdma_gen build/fbcode_builder/manifests/
-python3 build/fbcode_builder/getdeps.py build rdma_gen --src-dir .
+python3 build/fbcode_builder/getdeps.py build metaroce --src-dir .
