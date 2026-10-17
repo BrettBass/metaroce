@@ -19,8 +19,7 @@ namespace py3 facebook.neteng.ai.rdma_gen.thrift
 include "thrift/annotation/cpp.thrift"
 include "thrift/annotation/thrift.thrift"
 
-@thrift.AllowLegacyMissingUris
-package;
+package "facebook.com/neteng/ai/rdma_gen/if"
 
 @cpp.Type{name = "uint64_t"}
 typedef i64 ui64
