@@ -18,10 +18,22 @@
 // main, it does not initialize folly. The interposer under test owns the
 // only folly::Init in the process, exactly as with a real C consumer, so
 // backend teardown runs before singleton teardown by construction order.
+// Also serves the EnvGidsHonoredInFreshProcess child mode: when argv carries
+// kPreloadEnvChildArg, run the child check directly instead of the suite,
+// before InitGoogleTest sees a flag it would reject.
 
 #include <gtest/gtest.h>
 
+#include <cstring>
+
+#include "PreloadEnvChild.h"
+
 int main(int argc, char** argv) {
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], kPreloadEnvChildArg) == 0) {
+      return RunPreloadEnvChild();
+    }
+  }
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

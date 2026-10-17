@@ -105,13 +105,14 @@ endforeach()
 # The interposer ABI test links the preload library directly: the test
 # binary references ibv_* without linking libibverbs, so the loader binds
 # every call to the interposer, the same binding LD_PRELOAD produces. It
-# uses the plain gtest main: folly initializes through the interposer's
+# uses the shared plain gtest main (PreloadAbiMain.cpp, also serving the
+# re-executed child mode): folly initializes through the interposer's
 # own lazy path, as with a real C consumer.
 if(TARGET lsmr_preload)
-  add_executable(lsmr_PreloadAbiTest PreloadAbiTest.cpp)
+  add_executable(lsmr_PreloadAbiTest PreloadAbiTest.cpp PreloadAbiMain.cpp)
   target_include_directories(lsmr_PreloadAbiTest
                              PRIVATE ${IBVERBS_INCLUDE_DIRS})
   target_link_libraries(lsmr_PreloadAbiTest PRIVATE lsmr_preload
-                                                    GTest::gtest_main)
+                                                    GTest::gtest)
   gtest_discover_tests(lsmr_PreloadAbiTest)
 endif()

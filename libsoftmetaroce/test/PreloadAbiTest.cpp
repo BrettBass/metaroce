@@ -32,6 +32,7 @@
 #include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -39,6 +40,8 @@
 #include <string>
 
 #include <gtest/gtest.h>
+
+#include "PreloadEnvChild.h"
 
 // Drop the header's port-query redirect so the legacy-shape case below
 // references the raw compat symbol, as an ancient-header caller would. The
@@ -308,35 +311,70 @@ std::string gidToIpString(const ibv_gid& gid) {
   return buf;
 }
 
-// Runs in a re-executed copy of this binary with LSMR_PRELOAD_GIDS set
-// (see EnvGidsHonoredInFreshProcess): a fresh process exercises the real
-// interposer init path, constructor and lazy init alike. Skips without
-// the variable, so the in-suite and CTest-discovery runs stay green; the
-// parent only accepts a run whose output shows this test passed.
-TEST(PreloadEnvChild, EnvGidsSelectFirstGid) {
+} // namespace
+
+// Runs in a re-executed copy of this binary when main sees
+// kPreloadEnvChildArg (see EnvGidsHonoredInFreshProcess): a fresh process
+// exercises the real interposer init path, constructor and lazy init alike.
+// A plain function rather than a TEST, so standalone runs never report it
+// as skipped; the parent takes the exit status as the verdict. Diagnostics
+// go to stderr, which the parent captures and prints on failure. Failure
+// paths skip cleanup: the child exits immediately after returning.
+int RunPreloadEnvChild() {
   const char* gids = std::getenv("LSMR_PRELOAD_GIDS");
   if (gids == nullptr) {
-    GTEST_SKIP() << "runs only in the re-executed child, which the parent "
-                    "test starts with LSMR_PRELOAD_GIDS set";
+    fprintf(
+        stderr,
+        "error: LSMR_PRELOAD_GIDS is not set; the parent test starts this "
+        "mode with the requested address\n");
+    return 1;
   }
   int numDevices = 0;
   ibv_device** list = ibv_get_device_list(&numDevices);
-  ASSERT_NE(list, nullptr)
-      << "the requested address must exist locally; the parent only "
-         "requests addresses from its own live table";
-  ASSERT_EQ(numDevices, 1)
-      << "precondition: exactly one emulated device serves the query";
+  if (list == nullptr) {
+    fprintf(
+        stderr,
+        "error: no device list; the requested address must exist locally, "
+        "and the parent only requests addresses from its own live table\n");
+    return 1;
+  }
+  if (numDevices != 1) {
+    fprintf(
+        stderr,
+        "error: precondition: exactly one emulated device serves the "
+        "query, found %d\n",
+        numDevices);
+    return 1;
+  }
   ibv_context* ctx = ibv_open_device(list[0]);
-  ASSERT_NE(ctx, nullptr);
+  if (ctx == nullptr) {
+    fprintf(stderr, "error: ibv_open_device failed\n");
+    return 1;
+  }
   ibv_gid gid{};
-  ASSERT_EQ(ibv_query_gid(ctx, 1, 0, &gid), 0)
-      << "precondition: the selection check below compares gid index 0 "
-         "against the requested address";
-  EXPECT_EQ(memcmp(gid.raw, encodeIpToIbvGid(gids).raw, sizeof(gid.raw)), 0)
-      << "gid index 0 must be the requested address (" << gids << ")";
-  EXPECT_EQ(ibv_close_device(ctx), 0);
+  if (ibv_query_gid(ctx, 1, 0, &gid) != 0) {
+    fprintf(
+        stderr,
+        "error: precondition: the selection check below compares gid "
+        "index 0 against the requested address\n");
+    return 1;
+  }
+  if (memcmp(gid.raw, encodeIpToIbvGid(gids).raw, sizeof(gid.raw)) != 0) {
+    fprintf(
+        stderr,
+        "error: gid index 0 must be the requested address (%s)\n",
+        gids);
+    return 1;
+  }
+  if (ibv_close_device(ctx) != 0) {
+    fprintf(stderr, "error: ibv_close_device failed\n");
+    return 1;
+  }
   ibv_free_device_list(list);
+  return 0;
 }
+
+namespace {
 
 TEST_F(PreloadAbiTest, EnvGidsHonoredInFreshProcess) {
   // The fixture guarantees a live device, so the sandbox has usable
@@ -357,8 +395,8 @@ TEST_F(PreloadAbiTest, EnvGidsHonoredInFreshProcess) {
 
   // Set the environment before forking so the child runs nothing but
   // dup2/exec; the parent's backend is already constructed, so the flag
-  // change cannot affect it. Capture the child output to confirm the
-  // test passed rather than skipped: both exit 0.
+  // change cannot affect it. Capture the child output for failure
+  // diagnostics; its exit status is the verdict.
   char outTemplate[] = "/tmp/preload_env_child.XXXXXX";
   const int outFd = mkstemp(outTemplate);
   ASSERT_NE(outFd, -1) << "precondition: the parent reads the child "
@@ -379,7 +417,7 @@ TEST_F(PreloadAbiTest, EnvGidsHonoredInFreshProcess) {
     execl(
         "/proc/self/exe",
         "PreloadAbiTest",
-        "--gtest_filter=PreloadEnvChild.EnvGidsSelectFirstGid",
+        kPreloadEnvChildArg,
         (char*)nullptr);
     _exit(127); // execl failed; do not run parent teardown in the child.
   }
@@ -396,10 +434,5 @@ TEST_F(PreloadAbiTest, EnvGidsHonoredInFreshProcess) {
                                  << captured.str();
   EXPECT_EQ(WEXITSTATUS(status), 0) << "LSMR_PRELOAD_GIDS=" << requested << "\n"
                                     << captured.str();
-  EXPECT_NE(
-      captured.str().find("OK ] PreloadEnvChild.EnvGidsSelectFirstGid"),
-      std::string::npos)
-      << "the child must run the test to pass, not skip it\n"
-      << captured.str();
 }
 } // namespace
