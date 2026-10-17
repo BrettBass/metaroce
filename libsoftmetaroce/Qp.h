@@ -844,6 +844,11 @@ class Qp {
   // Sender-thread only, so the qwndBlocked* counters need no synchronization.
   void foldQwndBlockedTime(bool windowBlocked);
 
+  // Logs the single-owner transmit diagnostics line when this QP enqueued or
+  // dropped, subject to the process-wide teardown budget. Returns whether it
+  // logged, so the window-stall summary can reuse the budget decision.
+  [[nodiscard]] bool logTeardownDiagnostics();
+
   // Injected dependencies (owned by MetaRoceVerbs unless noted).
   HighResTimer& retxTimer_;
   QpArbiterIface& arbiter_;

@@ -325,14 +325,7 @@ Qp::Qp(
   removeFromArbiter.dismiss();
 }
 
-Qp::~Qp() {
-  // Stamp teardown start now: the window stall is closed and lifetime measured
-  // against this instant, so the cancellation/join/removeQp steps below are not
-  // counted as window-blocked.
-  const uint64_t teardownStartNs = steadyNowNs();
-  // Claim a budget slot only for a QP that enqueued, so idle ones don't spend
-  // it. A drop reports outside the budget, which healthy QPs could exhaust
-  // first.
+bool Qp::logTeardownDiagnostics() {
   const auto enqueued = soAcksEnqueued_.load(std::memory_order_relaxed);
   const auto dropped = soAcksDropped_.load(std::memory_order_relaxed);
   const auto cancelsEnqueued =
@@ -340,6 +333,9 @@ Qp::~Qp() {
   const auto cancelsDropped =
       soRnrCancelsDropped_.load(std::memory_order_relaxed);
   const bool anyDropped = dropped > 0 || cancelsDropped > 0;
+  // Claim a budget slot only for a QP that enqueued, so idle ones don't spend
+  // it. A drop reports outside the budget, which healthy QPs could exhaust
+  // first.
   const bool logTeardown = anyDropped ||
       ((enqueued > 0 || cancelsEnqueued > 0) && claimQpTeardownLogLine());
   if (logTeardown) {
@@ -390,6 +386,15 @@ Qp::~Qp() {
       LOG(INFO) << diagnostics;
     }
   }
+  return logTeardown;
+}
+
+Qp::~Qp() {
+  // Stamp teardown start now: the window stall is closed and lifetime measured
+  // against this instant, so the cancellation/join/removeQp steps below are not
+  // counted as window-blocked.
+  const uint64_t teardownStartNs = steadyNowNs();
+  const bool logTeardown = logTeardownDiagnostics();
   if (rcnActive_ && rcnRateHint_) {
     deactivateRcn();
   }
