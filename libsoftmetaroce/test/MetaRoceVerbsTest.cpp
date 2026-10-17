@@ -48,6 +48,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <string>
@@ -5233,6 +5234,356 @@ TEST_F(VerbsTest, AFallbackCreateTakesTheDomainTheFieldHolds) {
   if (undeclared != nullptr) {
     EXPECT_EQ(verbs_.ibv_destroy_qp(undeclared), 0);
   }
+}
+
+static std::vector<char> countingBytes(uint32_t count, char first) {
+  std::vector<char> bytes(count);
+  std::iota(bytes.begin(), bytes.end(), first);
+  return bytes;
+}
+
+// The headers of a message of opType carried whole in one packet to qp's
+// initial Tag.
+static std::pair<BaseHeader, DataHeader> singlePacketHeaders(
+    const Qp& qp,
+    BaseHeader::Opcode::OperationType opType,
+    uint16_t fsn,
+    uint16_t msn,
+    uint16_t csn) {
+  return {
+      BaseHeader::BaseHeaderBuilder()
+          .setSrcQp(qp.getRemoteQpNum())
+          .setDstQp(qp.getLocalQpNum())
+          .setOpcode(BaseHeader::Opcode(opType))
+          .setVersion(0)
+          .setFlowId(0)
+          .build(),
+      DataHeader::DataHeaderBuilder()
+          .setFsn(fsn)
+          .setUna(0)
+          .setTag(kMetaRoceInitialTag)
+          .setAckRequest(true)
+          .setPosn(0)
+          .setMsn(msn)
+          .setCsn(csn)
+          .setTimestamp(0)
+          .build()};
+}
+
+// Each case posts at a nonzero offset into a sentinel-filled buffer and
+// compares the whole buffer, so bytes landing anywhere but at the offset show.
+class ZeroBasedLocalBufferTest : public VerbsTest {
+ protected:
+  static constexpr char kSentinel = 0x5a;
+  static constexpr uint32_t kMessageBytes = 64;
+  static constexpr uint64_t kOffset = 32;
+
+  void SetUp() override {
+    VerbsTest::SetUp();
+    mr_ = verbs_.ibv_reg_mr_internal(
+        pd_,
+        buffer_.data(),
+        buffer_.size(),
+        IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_ZERO_BASED);
+    ASSERT_NE(mr_, nullptr);
+  }
+
+  void TearDown() override {
+    if (mr_ != nullptr) {
+      EXPECT_EQ(verbs_.ibv_dereg_mr(mr_), 0);
+    }
+    VerbsTest::TearDown();
+  }
+
+  [[nodiscard]] std::vector<char> withBytesAtOffset(
+      const std::vector<char>& bytes) const {
+    std::vector<char> expected(buffer_.size(), kSentinel);
+    std::copy(bytes.begin(), bytes.end(), expected.begin() + kOffset);
+    return expected;
+  }
+
+  [[nodiscard]] struct ibv_sge sgeAtOffset(uint64_t offset, uint32_t length)
+      const {
+    return {.addr = offset, .length = length, .lkey = mr_->lkey};
+  }
+
+  std::vector<char> buffer_ = std::vector<char>(256, kSentinel);
+  struct ibv_mr* mr_{nullptr};
+};
+
+TEST_F(ZeroBasedLocalBufferTest, AReceiveScattersAtItsOffset) {
+  struct ibv_qp* const ibvqp = fixtureQp();
+  ASSERT_NE(ibvqp, nullptr);
+  Qp* const qp = verbs_.getQpByNum(MetaRoceVerbs::qpAndTagToQp(ibvqp->qp_num));
+  ASSERT_NE(qp, nullptr);
+  struct ibv_sge sge = sgeAtOffset(kOffset, kMessageBytes);
+  struct ibv_recv_wr recvWr{.wr_id = 1, .sg_list = &sge, .num_sge = 1};
+  struct ibv_recv_wr* badWr = nullptr;
+  ASSERT_EQ(verbs_.ibv_post_recv(ibvqp, &recvWr, &badWr), 0)
+      << "precondition: the receive is posted";
+  ASSERT_TRUE(qp->waitForRWqesToBePosted(1, std::chrono::milliseconds(100)))
+      << "precondition: the receive is pending when the message arrives";
+
+  const auto payload = countingBytes(kMessageBytes, 1);
+  const auto [baseHeader, dataHeader] = singlePacketHeaders(
+      *qp,
+      BaseHeader::Opcode::OperationType::SEND,
+      /*fsn=*/0,
+      qp->getTag(kMetaRoceInitialTag)->getNextMsn(),
+      /*csn=*/0);
+  const DataPacket send(baseHeader, dataHeader, payload.data(), payload.size());
+  qp->getRxFlowById(0)->processDataPacket(&send, kEcnECT0);
+
+  EXPECT_EQ(buffer_, withBytesAtOffset(payload))
+      << "ibv_post_recv(3) gives a zero-based region's SGE address as an "
+         "offset from the start of the region";
+}
+
+TEST_F(ZeroBasedLocalBufferTest, ASharedQueueReceiveScattersAtItsOffset) {
+  struct ibv_srq_init_attr srqInitAttr{
+      .attr = ibv_srq_attr{.max_wr = 4, .max_sge = 1}};
+  struct ibv_srq* const srq = verbs_.ibv_create_srq(pd_, &srqInitAttr);
+  ASSERT_NE(srq, nullptr);
+  struct ibv_qp* const ibvqp = setupQpOnSharedQueue(
+      verbs_, cq_, pd_, srq, folly::IPAddressV6("fc00::1"), kDestQpNum);
+  ASSERT_NE(ibvqp, nullptr);
+  Qp* const qp = verbs_.getQpByNum(MetaRoceVerbs::qpAndTagToQp(ibvqp->qp_num));
+  ASSERT_NE(qp, nullptr);
+  struct ibv_sge sge = sgeAtOffset(kOffset, kMessageBytes);
+  struct ibv_recv_wr recvWr{.wr_id = 1, .sg_list = &sge, .num_sge = 1};
+  struct ibv_recv_wr* badWr = nullptr;
+  ASSERT_EQ(verbs_.ibv_post_srq_recv(srq, &recvWr, &badWr), 0)
+      << "precondition: the receive is posted to the shared queue";
+
+  const auto payload = countingBytes(kMessageBytes, 1);
+  const auto [baseHeader, dataHeader] = singlePacketHeaders(
+      *qp,
+      BaseHeader::Opcode::OperationType::SEND,
+      /*fsn=*/0,
+      qp->getTag(kMetaRoceInitialTag)->getNextMsn(),
+      /*csn=*/0);
+  const DataPacket send(baseHeader, dataHeader, payload.data(), payload.size());
+  qp->getRxFlowById(0)->processDataPacket(&send, kEcnECT0);
+
+  EXPECT_EQ(buffer_, withBytesAtOffset(payload))
+      << "ibv_post_srq_recv(3) gives a zero-based region's SGE address as an "
+         "offset from the start of the region";
+
+  EXPECT_EQ(verbs_.ibv_destroy_qp(ibvqp), 0);
+  EXPECT_EQ(verbs_.ibv_destroy_srq(srq), 0);
+}
+
+TEST_F(ZeroBasedLocalBufferTest, AReadResponseLandsAtItsOffset) {
+  struct ibv_qp* const ibvqp = setup_qp(
+      verbs_,
+      cq_,
+      pd_,
+      folly::IPAddressV6("fc00::1"),
+      kDestQpNum,
+      IBV_MTU_2048,
+      /*sqSigAll=*/true,
+      /*maxRdAtomic=*/1);
+  ASSERT_NE(ibvqp, nullptr);
+  Qp* const qp = verbs_.getQpByNum(MetaRoceVerbs::qpAndTagToQp(ibvqp->qp_num));
+  ASSERT_NE(qp, nullptr);
+  const uint16_t readMsn = qp->getTag(kMetaRoceInitialTag)->getNextMsn();
+  struct ibv_sge sge = sgeAtOffset(kOffset, kMessageBytes);
+  struct ibv_send_wr readWr{
+      .wr_id = 1,
+      .sg_list = &sge,
+      .num_sge = 1,
+      .opcode = IBV_WR_RDMA_READ,
+      .wr = {.rdma = {.remote_addr = 0x1000, .rkey = 1}}};
+  struct ibv_send_wr* badWr = nullptr;
+  ASSERT_EQ(verbs_.ibv_post_send(ibvqp, &readWr, &badWr), 0)
+      << "precondition: the read is posted";
+  ASSERT_TRUE(qp->waitForWqesToBePosted(1, std::chrono::milliseconds(100)))
+      << "precondition: the read is pending when its response arrives";
+
+  const auto payload = countingBytes(kMessageBytes, 1);
+  const auto [baseHeader, dataHeader] = singlePacketHeaders(
+      *qp,
+      BaseHeader::Opcode::OperationType::READ_RESP,
+      /*fsn=*/0,
+      readMsn,
+      /*csn=*/0);
+  const DataPacket response(
+      baseHeader, dataHeader, payload.data(), payload.size());
+  qp->getRxFlowById(0)->processDataPacket(&response, kEcnECT0);
+
+  EXPECT_EQ(buffer_, withBytesAtOffset(payload))
+      << "ibv_post_send(3) gives a zero-based region's SGE address as an "
+         "offset from the start of the region, for a read's destination too";
+
+  EXPECT_EQ(verbs_.ibv_destroy_qp(ibvqp), 0);
+}
+
+TEST_F(ZeroBasedLocalBufferTest, AtomicResultsLandAtTheirOffsets) {
+  struct ibv_qp* const ibvqp = setup_qp(
+      verbs_,
+      cq_,
+      pd_,
+      folly::IPAddressV6("fc00::1"),
+      kDestQpNum,
+      IBV_MTU_2048,
+      /*sqSigAll=*/true,
+      /*maxRdAtomic=*/2);
+  ASSERT_NE(ibvqp, nullptr);
+  Qp* const qp = verbs_.getQpByNum(MetaRoceVerbs::qpAndTagToQp(ibvqp->qp_num));
+  ASSERT_NE(qp, nullptr);
+  const uint16_t firstMsn = qp->getTag(kMetaRoceInitialTag)->getNextMsn();
+  struct ibv_sge fetchAddSge = sgeAtOffset(kOffset, kAtomicOperationSizeBytes);
+  struct ibv_sge compareSwapSge = sgeAtOffset(
+      kOffset + kAtomicOperationSizeBytes, kAtomicOperationSizeBytes);
+  struct ibv_send_wr compareSwap{
+      .wr_id = 2,
+      .sg_list = &compareSwapSge,
+      .num_sge = 1,
+      .opcode = IBV_WR_ATOMIC_CMP_AND_SWP,
+      .wr = {.atomic = {.remote_addr = 0x1008, .rkey = 1}}};
+  struct ibv_send_wr fetchAdd{
+      .wr_id = 1,
+      .next = &compareSwap,
+      .sg_list = &fetchAddSge,
+      .num_sge = 1,
+      .opcode = IBV_WR_ATOMIC_FETCH_AND_ADD,
+      .wr = {.atomic = {.remote_addr = 0x1000, .rkey = 1}}};
+  struct ibv_send_wr* badWr = nullptr;
+  ASSERT_EQ(verbs_.ibv_post_send(ibvqp, &fetchAdd, &badWr), 0)
+      << "precondition: both atomics are posted";
+  ASSERT_TRUE(qp->waitForWqesToBePosted(2, std::chrono::milliseconds(100)))
+      << "precondition: both atomics are pending when their acks arrive";
+
+  const std::array<uint64_t, 2> originals{
+      0x0102030405060708ULL, 0x1112131415161718ULL};
+  for (uint16_t i = 0; i < originals.size(); ++i) {
+    const auto [baseHeader, dataHeader] = singlePacketHeaders(
+        *qp,
+        BaseHeader::Opcode::OperationType::ATOMIC_ACK_RESP,
+        /*fsn=*/i,
+        static_cast<uint16_t>(firstMsn + i),
+        /*csn=*/0);
+    const AtomicAckPacket ack(
+        baseHeader,
+        dataHeader,
+        AtomicAckHeader::AtomicAckHeaderBuilder()
+            .setOrigRemoteData(originals.at(i))
+            .build());
+    qp->getRxFlowById(0)->processDataPacket(&ack, kEcnECT0);
+  }
+
+  std::vector<char> results(sizeof(originals));
+  std::memcpy(results.data(), originals.data(), sizeof(originals));
+  EXPECT_EQ(buffer_, withBytesAtOffset(results))
+      << "ibv_post_send(3) gives a zero-based region's SGE address as an "
+         "offset from the start of the region, for an atomic's result too";
+
+  EXPECT_EQ(verbs_.ibv_destroy_qp(ibvqp), 0);
+}
+
+// Watches the wire for a send and a write each carrying a known payload.
+struct PayloadsOnTheWire {
+  std::vector<char> sendPayload;
+  std::vector<char> writePayload;
+  folly::Baton<> sendSeen;
+  folly::Baton<> writeSeen;
+  std::atomic_flag sendPosted = ATOMIC_FLAG_INIT;
+  std::atomic_flag writePosted = ATOMIC_FLAG_INIT;
+
+  auto socketMaker() {
+    return [this](folly::EventBase* evb) -> SocketWithModifier {
+      auto socket = std::make_unique<NiceMock<MockUDPSocket>>(evb);
+      ON_CALL(*socket, write(_, _))
+          .WillByDefault([this](
+                             const folly::SocketAddress&,
+                             const std::unique_ptr<folly::IOBuf>& buf) {
+            auto wire = CHECK_NOTNULL(buf.get())->clone();
+            wire->coalesce();
+            if (carries(*wire, sendPayload) &&
+                !sendPosted.test_and_set(std::memory_order_relaxed)) {
+              sendSeen.post();
+            }
+            if (carries(*wire, writePayload) &&
+                !writePosted.test_and_set(std::memory_order_relaxed)) {
+              writeSeen.post();
+            }
+            return wire->computeChainDataLength();
+          });
+      return std::make_pair(std::move(socket), nullptr);
+    };
+  }
+
+  static bool carries(
+      const folly::IOBuf& wire,
+      const std::vector<char>& bytes) {
+    const auto* const begin = reinterpret_cast<const char*>(wire.data());
+    const auto* const end = begin + wire.length();
+    return std::search(begin, end, bytes.begin(), bytes.end()) != end;
+  }
+};
+
+TEST(MetaRoceVerbsTest, ASendAndAWriteReadTheirSourceAtAZeroBasedOffset) {
+  constexpr uint32_t kMessageBytes = 64;
+  constexpr uint64_t kSendOffset = 32;
+  constexpr uint64_t kWriteOffset = 96;
+  PayloadsOnTheWire wire{
+      .sendPayload = countingBytes(kMessageBytes, 1),
+      .writePayload = countingBytes(kMessageBytes, 0x41)};
+  std::vector<char> buffer(256, 0x5a);
+  std::copy(
+      wire.sendPayload.begin(),
+      wire.sendPayload.end(),
+      buffer.begin() + kSendOffset);
+  std::copy(
+      wire.writePayload.begin(),
+      wire.writePayload.end(),
+      buffer.begin() + kWriteOffset);
+
+  libsoftmetaroce::MetaRoceVerbs verbs(wire.socketMaker());
+  struct ibv_context context{};
+  struct ibv_cq* const cq =
+      verbs.ibv_create_cq(&context, 10, nullptr, nullptr, 0);
+  ASSERT_NE(cq, nullptr);
+  struct ibv_pd* const pd = verbs.ibv_alloc_pd(&context);
+  ASSERT_NE(pd, nullptr);
+  struct ibv_mr* const mr = verbs.ibv_reg_mr_internal(
+      pd, buffer.data(), buffer.size(), IBV_ACCESS_ZERO_BASED);
+  ASSERT_NE(mr, nullptr);
+  struct ibv_qp* const ibvqp =
+      setup_qp(verbs, cq, pd, folly::IPAddressV6("fc00::1"), 10, IBV_MTU_2048);
+  ASSERT_NE(ibvqp, nullptr);
+
+  struct ibv_sge sendSge{
+      .addr = kSendOffset, .length = kMessageBytes, .lkey = mr->lkey};
+  struct ibv_sge writeSge{
+      .addr = kWriteOffset, .length = kMessageBytes, .lkey = mr->lkey};
+  struct ibv_send_wr write{
+      .wr_id = 2,
+      .sg_list = &writeSge,
+      .num_sge = 1,
+      .opcode = IBV_WR_RDMA_WRITE,
+      .wr = {.rdma = {.remote_addr = 0x1000, .rkey = 1}}};
+  struct ibv_send_wr send{
+      .wr_id = 1,
+      .next = &write,
+      .sg_list = &sendSge,
+      .num_sge = 1,
+      .opcode = IBV_WR_SEND};
+  struct ibv_send_wr* badWr = nullptr;
+  ASSERT_EQ(verbs.ibv_post_send(ibvqp, &send, &badWr), 0)
+      << "precondition: both requests are posted";
+
+  EXPECT_TRUE(wire.sendSeen.try_wait_for(std::chrono::seconds(5)))
+      << "ibv_post_send(3) gives a zero-based region's SGE address as an "
+         "offset from the start of the region, for a send's source";
+  EXPECT_TRUE(wire.writeSeen.try_wait_for(std::chrono::seconds(5)))
+      << "ibv_post_send(3) gives a zero-based region's SGE address as an "
+         "offset from the start of the region, for a write's source";
+
+  EXPECT_EQ(verbs.ibv_destroy_qp(ibvqp), 0);
+  EXPECT_EQ(verbs.ibv_dereg_mr(mr), 0);
+  EXPECT_EQ(verbs.ibv_dealloc_pd(pd), 0);
+  EXPECT_EQ(verbs.ibv_destroy_cq(cq), 0);
 }
 
 } // namespace libsoftmetaroce

@@ -407,11 +407,6 @@ class MetaRoceVerbs : public RdmaVerbs, public folly::NonCopyableNonMovable {
   std::pair<void* FOLLY_NULLABLE, uint32_t> addressAndLengthFromSge(
       const struct ibv_sge* singleSge);
 
-  // Whether the SGE points to memory registered for local read under its lkey.
-  bool isSgeLocallyValid(
-      const struct ibv_pd* pd,
-      const struct ibv_sge* singleSge);
-
   // Posts one work request of a chain: 0, or the errno that refuses it.
   int postSendWr(struct ibv_qp* ibvqp, Qp& qp, const struct ibv_send_wr* wr);
   int postRecvWr(struct ibv_qp* ibvqp, Qp& qp, const struct ibv_recv_wr* wr);

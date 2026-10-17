@@ -107,10 +107,12 @@ MemoryRegions::RemoteAtomicTarget MemoryRegions::targetForRemoteAtomic(
 
 bool MemoryRegions::isValidLocal(
     const struct ibv_pd* pd,
-    char* address,
+    char* FOLLY_NULLABLE address,
     uint32_t length,
     uint32_t key,
     int requiredAccess) const {
+  // The address is compared with region bounds, never read, so null is safe.
+  // NOLINTNEXTLINE(facebook-hte-NullableDereference)
   return checkedAddress(
              pd,
              reinterpret_cast<uint64_t>(address),
@@ -119,6 +121,24 @@ bool MemoryRegions::isValidLocal(
              requiredAccess,
              AddressKind::Virtual)
       .has_value();
+}
+
+void* FOLLY_NULLABLE MemoryRegions::localAddressOf(
+    const struct ibv_pd* pd,
+    uint64_t addr,
+    uint32_t key) const {
+  const auto lockedRegions = memoryRegions_.rlock();
+  const auto it = lockedRegions->find(key);
+  // A zero-length SGE may hold a key that identifies no region.
+  const bool keyIdentifiesARegionOfPd =
+      it != lockedRegions->end() && it->second->mr.pd == pd;
+  // Only a nonzero base can overflow, and no such region contains address 0.
+  const uint64_t resolved = keyIdentifiesARegionOfPd
+      ? it->second->resolvedAddress(addr).value_or(0)
+      : addr;
+  // An SGE holds its address as a uint64_t; callers store it as a pointer.
+  // NOLINTNEXTLINE(performance-no-int-to-ptr)
+  return reinterpret_cast<void*>(resolved);
 }
 
 std::optional<uint64_t> MemoryRegions::checkedAddress(

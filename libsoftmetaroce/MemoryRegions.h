@@ -107,10 +107,15 @@ class MemoryRegions {
   // to grant; 0 for a local read, which needs no permission.
   bool isValidLocal(
       const struct ibv_pd* pd,
-      char* address,
+      char* FOLLY_NULLABLE address,
       uint32_t length,
       uint32_t key,
       int requiredAccess) const;
+
+  // The virtual address a local SGE identifies: for a zero-based region of pd,
+  // addr added to the region's base; otherwise addr itself.
+  [[nodiscard]] void* FOLLY_NULLABLE
+  localAddressOf(const struct ibv_pd* pd, uint64_t addr, uint32_t key) const;
 
  protected:
   [[nodiscard]] std::optional<uint64_t> addressForRemote(
@@ -127,8 +132,8 @@ class MemoryRegions {
   }
 
  private:
-  // The local paths read an address as absolute, so they do not serve a
-  // zero-based region; a wire address is an offset into one.
+  // The local paths read an address as absolute; a wire address is an offset
+  // into a zero-based region.
   enum class AddressKind { Virtual, FromTheWire };
   [[nodiscard]] std::optional<uint64_t> checkedAddress(
       const struct ibv_pd* pd,

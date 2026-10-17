@@ -1468,8 +1468,8 @@ int MetaRoceVerbs::ibv_post_srq_recv(
     SharedReceive receive{.workRequestId = wr->wr_id};
     if (wr->num_sge == 1) {
       const struct ibv_sge& sge = *CHECK_NOTNULL(sgList);
-      // NOLINTNEXTLINE(performance-no-int-to-ptr)
-      receive.address = reinterpret_cast<void*>(sge.addr);
+      receive.address = memoryRegions_.localAddressOf(
+          queue->getProtectionDomain(), sge.addr, sge.lkey);
       receive.length = sge.length;
       receive.localKey = sge.lkey;
     }
@@ -2233,22 +2233,6 @@ MetaRoceVerbs::addressAndLengthFromSge(const struct ibv_sge* singleSge) {
   return {nullptr, 0};
 }
 
-// Kept apart from the extraction above so a caller that never reads the source
-// through its local key -- an inline payload, an atomic -- can take the address
-// without the key being looked up on its behalf.
-bool MetaRoceVerbs::isSgeLocallyValid(
-    const struct ibv_pd* pd,
-    const struct ibv_sge* singleSge) {
-  if (singleSge == nullptr) {
-    return true;
-  }
-  // NOLINTNEXTLINE(performance-no-int-to-ptr)
-  auto* addr = reinterpret_cast<char*>(singleSge->addr);
-  // A send reads the local buffer, which needs no registered permission.
-  return memoryRegions_.isValidLocal(
-      pd, addr, singleSge->length, singleSge->lkey, 0);
-}
-
 int MetaRoceVerbs::postSendWr(
     struct ibv_qp* ibvqp,
     Qp& qp,
@@ -2264,9 +2248,15 @@ int MetaRoceVerbs::postSendWr(
     return EINVAL;
   }
   const struct ibv_sge* singleSge = wr->num_sge == 1 ? wr->sg_list : nullptr;
-  auto [addr, length] = addressAndLengthFromSge(singleSge);
+  const auto [sgeAddr, length] = addressAndLengthFromSge(singleSge);
   const uint32_t lkey = singleSge != nullptr ? singleSge->lkey : 0;
   const bool isInline = wr->send_flags & IBV_SEND_INLINE;
+  // An inline payload is copied from the caller's pointer; any other buffer is
+  // addressed through the region its lkey identifies.
+  void* const addr = isInline
+      ? sgeAddr
+      : memoryRegions_.localAddressOf(
+            ibvqp->pd, singleSge != nullptr ? singleSge->addr : 0, lkey);
   if (isInline) {
     // Inline data is copied into the WQE, so it applies only to operations that
     // carry a send payload and must fit the cap this Tag was granted; any
@@ -2317,15 +2307,18 @@ int MetaRoceVerbs::postSendWr(
   // remotely to complete with the remote-access error; the spec permits either
   // order, so that expectation is the tiebreak. Reads and atomics defer to the
   // response/ack writeback (see RxFlow) to report the remote error, so they do
-  // not consult a local key here. Inline data is copied from the source here,
-  // so its local key is likewise never consulted -- neither reaches the lookup.
+  // not validate a local key here. Inline data is copied from the source here,
+  // so its local key is likewise never validated -- neither reaches the check.
   // A bad local key is a terminal local protection error. The WQE is still
   // posted so the completion is reported when it reaches its turn in MSN order,
   // behind the WRs posted before it.
   std::optional<WorkCompletionStatus> postError;
   const bool wrNeedsValidSge =
       !isAtomic && !isInline && !isRead && !isReadWithImm;
-  if (wrNeedsValidSge && !isSgeLocallyValid(ibvqp->pd, singleSge)) {
+  // A send reads the local buffer, which needs no registered permission.
+  if (wrNeedsValidSge &&
+      !memoryRegions_.isValidLocal(
+          ibvqp->pd, static_cast<char*>(addr), length, lkey, 0)) {
     LOG(ERROR)
         << "post_send with an unregistered local address; completing with "
            "local protection error";
@@ -2509,8 +2502,7 @@ int MetaRoceVerbs::postRecvWr(
   uint32_t lkey = 0;
   if (singleSge != nullptr) {
     const struct ibv_sge& sge = *singleSge;
-    // NOLINTNEXTLINE(performance-no-int-to-ptr)
-    addr = reinterpret_cast<void*>(sge.addr);
+    addr = memoryRegions_.localAddressOf(ibvqp->pd, sge.addr, sge.lkey);
     length = sge.length;
     lkey = sge.lkey;
   }
