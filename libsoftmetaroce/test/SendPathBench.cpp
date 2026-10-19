@@ -38,6 +38,7 @@
 #include <libsoftmetaroce/congestion_control/CongestionController.h>
 #include <libsoftmetaroce/test/LimitedTestSender.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 
 #include <vector>
 
@@ -139,8 +140,7 @@ struct SendBenchFixture {
                          "dominate what this measures";
     const bool posted = qp->postWqe(
         kMetaRoceInitialTag,
-        std::make_unique<SendWqe>(
-            0, payload.data(), static_cast<size_t>(packets) * kMtu, kMtu));
+        std::make_unique<SendWqe>(0, oneSge(payload), kMtu));
     CHECK(posted) << "the timed loop builds packets from this WQE's posns";
     processPostedWqes(qp.get(), 1);
     flow = qp->getTxFlowById(0);

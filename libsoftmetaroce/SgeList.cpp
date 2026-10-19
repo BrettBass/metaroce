@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include <glog/logging.h>
 #include <libsoftmetaroce/Constants.h>
 #include <libsoftmetaroce/SgeList.h>
 #include <limits>
@@ -38,6 +39,16 @@ std::optional<ValidatedSgeList> validatedSgeList(
   }
   return ValidatedSgeList{
       .sges = sges, .totalLength = static_cast<uint32_t>(totalLength)};
+}
+
+uint32_t totalSgeLength(std::span<const LocalSge> sges) {
+  uint64_t totalBytes = 0;
+  for (const LocalSge& sge : sges) {
+    totalBytes += sge.length;
+  }
+  CHECK_LE(totalBytes, std::numeric_limits<uint32_t>::max())
+      << "the total SGE length must fit in uint32_t";
+  return static_cast<uint32_t>(totalBytes);
 }
 
 } // namespace libsoftmetaroce

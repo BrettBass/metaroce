@@ -33,6 +33,7 @@
 #include <libsoftmetaroce/test/LimitedTestSender.h>
 #include <libsoftmetaroce/test/MockCongestionController.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 #include <libsoftmetaroce/test/SourcePortRecorder.h>
 #include <libsoftmetaroce/test/TxTimerSuppressor.h>
 #include <array>
@@ -122,7 +123,7 @@ class SenderTest : public TestWithParam<int> {
     CHECK(qp->postWqe(
         tag,
         std::make_unique<SendWqe>(
-            workReqId, payload.get(), length, qp->getMtu())));
+            workReqId, oneSge(payload.get(), length), qp->getMtu())));
     return TestWqePayload{std::move(payload), frames, length};
   }
 
@@ -338,8 +339,9 @@ TEST_F(SenderTest, SendLoop) {
       kMetaRoceInitialTag,
       std::make_unique<SendWqe>(
           0 /* workReqId */,
-          payload.get(), /*address*/
-          length,
+          oneSge(
+              payload.get(), /*address*/
+              length),
           qp->getMtu())));
   qp->startProcessingWqes();
 
@@ -373,8 +375,9 @@ TEST_F(SenderTest, SendRetxPacketsDueToLoss) {
   std::unique_ptr<char[]> payload(new char[length]);
   auto wqe = std::make_unique<SendWqe>(
       0 /* workReqId */,
-      payload.get(), /*address*/
-      length,
+      oneSge(
+          payload.get(), /*address*/
+          length),
       qp->getMtu());
 
   wqe->setMsn(0);
@@ -515,8 +518,9 @@ TEST_P(SenderTest, SendNFrames) {
   std::unique_ptr<char[]> payload(new char[length]);
   auto wqe = std::make_unique<SendWqe>(
       0 /*workReqId*/,
-      payload.get(), /*address*/
-      length,
+      oneSge(
+          payload.get(), /*address*/
+          length),
       mtu);
   auto& txState = flow->getTxState();
   ASSERT_TRUE(qp->postWqe(kMetaRoceInitialTag, std::move(wqe)));
@@ -1279,8 +1283,9 @@ TEST_F(SenderTest, ProcessAckPacketAcceptsOldAckWhenSlowFlagIsTrue) {
   std::unique_ptr<char[]> payload(new char[length]);
   auto wqe = std::make_unique<SendWqe>(
       0 /* workReqId */,
-      payload.get(), /*address*/
-      length,
+      oneSge(
+          payload.get(), /*address*/
+          length),
       mtu);
 
   wqe->setMsn(0);
@@ -1340,8 +1345,9 @@ TEST_F(SenderTest, ProcessAckPacketIgnoresOldAckWhenSlowFlagIsFalse) {
   std::unique_ptr<char[]> payload(new char[length]);
   auto wqe = std::make_unique<SendWqe>(
       0 /* workReqId */,
-      payload.get(), /*address*/
-      length,
+      oneSge(
+          payload.get(), /*address*/
+          length),
       mtu);
 
   wqe->setMsn(0);
@@ -1470,8 +1476,9 @@ TEST_F(SenderTest, SendPathShift) {
       kMetaRoceInitialTag,
       std::make_unique<SendWqe>(
           0 /* workReqId */,
-          payload.get(), /*address*/
-          length,
+          oneSge(
+              payload.get(), /*address*/
+              length),
           qp->getMtu())));
 
   qp->startProcessingWqes();
@@ -1699,7 +1706,8 @@ TEST_F(SenderTest, SingleOwnerTxEnqueuedAckIsAppliedBySenderDrain) {
   const uint16_t frames = 5;
   const uint32_t length = frames * qp->getMtu();
   std::unique_ptr<char[]> payload(new char[length]);
-  auto wqe = std::make_unique<SendWqe>(0, payload.get(), length, qp->getMtu());
+  auto wqe =
+      std::make_unique<SendWqe>(0, oneSge(payload.get(), length), qp->getMtu());
   wqe->setMsn(0);
   wqe->setCsn(0);
   auto& txState = flow->getTxState();

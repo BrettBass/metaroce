@@ -27,6 +27,7 @@
 #include <libsoftmetaroce/test/LimitedTestSender.h>
 #include <libsoftmetaroce/test/MockCongestionController.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 
 using namespace testing;
 namespace libsoftmetaroce {
@@ -79,8 +80,9 @@ testRoundRobin(int baseQpNum, int numQps, int numPacketsPerQp) {
         kMetaRoceInitialTag,
         std::make_unique<SendWqe>(
             0 /* workReqId */,
-            payload.get(), /*address*/
-            length,
+            oneSge(
+                payload.get(), /*address*/
+                length),
             qp->getMtu())));
   }
 

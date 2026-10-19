@@ -672,10 +672,12 @@ std::unique_ptr<ReceiveWqe> Tag::takeReceiveFromSharedQueue(
   }
   auto receiveWqe = std::make_unique<ReceiveWqe>(
       taken->workRequestId,
-      taken->address,
-      taken->length,
-      mtu,
-      taken->localKey);
+      LocalSges{{
+          .address = taken->address,
+          .length = taken->length,
+          .lkey = taken->localKey,
+      }},
+      mtu);
   receiveWqe->setCsn(csn);
   return receiveWqe;
 }

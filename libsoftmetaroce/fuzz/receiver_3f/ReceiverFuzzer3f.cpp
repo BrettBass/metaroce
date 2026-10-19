@@ -64,6 +64,7 @@
 #include <libsoftmetaroce/codec/RnrCancelHeader.h>
 #include <libsoftmetaroce/test/LimitedTestSender.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 #include <libsoftmetaroce/test/PostToTag.h>
 
 #include "security/lionhead/utils/lib_ftest/ftest.h"
@@ -209,12 +210,14 @@ class ReceiverFuzzer3f : public ::testing::Test {
     // Post multiple receive WQEs so data processing can proceed past tag
     // lookup for several iterations.
     auto lockedMap = qpMap_.rlock();
-    auto* qpPtr = lockedMap->at(kQpNum).get();
-    auto tag = qpPtr->getTag(libsoftmetaroce::kMetaRoceInitialTag);
+    auto& postedQp = *CHECK_NOTNULL(lockedMap->at(kQpNum).get());
+    auto tag = postedQp.getTag(libsoftmetaroce::kMetaRoceInitialTag);
     for (int i = 0; i < 4; ++i) {
       auto rwqe = std::make_unique<libsoftmetaroce::ReceiveWqe>(
-          /*workReqId=*/42 + i, recvBuf_ + i * 2048, 2048, qpPtr->getMtu());
-      libsoftmetaroce::postToTag(*tag, std::move(rwqe), qpPtr->getMtu());
+          /*workReqId=*/42 + i,
+          libsoftmetaroce::oneSge(recvBuf_ + i * 2048, 2048),
+          postedQp.getMtu());
+      libsoftmetaroce::postToTag(*tag, std::move(rwqe), postedQp.getMtu());
     }
   }
 

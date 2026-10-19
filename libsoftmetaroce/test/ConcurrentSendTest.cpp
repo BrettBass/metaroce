@@ -31,6 +31,7 @@
 #include <libsoftmetaroce/modifier/Modifier.h>
 #include <libsoftmetaroce/test/MockCongestionController.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 
 #include <algorithm>
 #include <atomic>
@@ -225,7 +226,7 @@ void runManyQps(
     ASSERT_TRUE(qp->postWqe(
         kMetaRoceInitialTag,
         std::make_unique<SendWqe>(
-            0 /* workReqId */, payload.get(), length, qp->getMtu())));
+            0 /* workReqId */, oneSge(payload.get(), length), qp->getMtu())));
     payloads.push_back(std::move(payload));
   }
 
@@ -372,7 +373,7 @@ TEST(ConcurrentSendTest, RtoRecoversFramesDiscardedByGsoFault) {
   ASSERT_TRUE(qp->postWqe(
       kMetaRoceInitialTag,
       std::make_unique<SendWqe>(
-          0 /* workReqId */, payload.get(), length, qp->getMtu())))
+          0 /* workReqId */, oneSge(payload.get(), length), qp->getMtu())))
       << "the WQE this case retransmits must post, or the RTO has nothing to "
          "recover and the test proves nothing";
 
@@ -467,7 +468,7 @@ TEST(ConcurrentSendTest, SendBatchWithSingleConsumerDrainsAllQps) {
     ASSERT_TRUE(qp->postWqe(
         kMetaRoceInitialTag,
         std::make_unique<SendWqe>(
-            0 /* workReqId */, payload.get(), length, qp->getMtu())));
+            0 /* workReqId */, oneSge(payload.get(), length), qp->getMtu())));
     payloads.push_back(std::move(payload));
   }
 
@@ -632,7 +633,7 @@ void runGsoFastStartTrace(uint16_t packetsPerVisit) {
     ASSERT_TRUE(qp->postWqe(
         kMetaRoceInitialTag,
         std::make_unique<SendWqe>(
-            0 /* workReqId */, payload.get(), length, mtu)));
+            0 /* workReqId */, oneSge(payload.get(), length), mtu)));
     payloads.push_back(std::move(payload));
   };
 

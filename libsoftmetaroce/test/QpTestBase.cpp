@@ -19,6 +19,7 @@
 #include <folly/coro/Task.h>
 #include <folly/coro/WithCancellation.h>
 
+#include <libsoftmetaroce/test/OneSge.h>
 #include <libsoftmetaroce/test/QpTestBase.h>
 
 using namespace ::testing;
@@ -132,8 +133,7 @@ Wqe* QpTestBase::postWqeHelper(Qp* postQp, WqeData wqeData, bool doProcessWqe) {
           << "Write with immediate requires immediate data!";
       wqe = std::make_unique<WriteWithImmWqe>(
           wqeData.workReqId.value(),
-          wqeData.address.value(),
-          wqeData.msgSizeBytes,
+          oneSge(wqeData.address.value(), wqeData.msgSizeBytes),
           wqeData.mtu.value(),
           wqeData.remote_addr.value_or((unsigned long)receiveBuffer.data()),
           wqeData.rkey.value_or(1),
@@ -142,8 +142,7 @@ Wqe* QpTestBase::postWqeHelper(Qp* postQp, WqeData wqeData, bool doProcessWqe) {
     case Wqe::WorkType::kSend:
       wqe = std::make_unique<SendWqe>(
           wqeData.workReqId.value(),
-          wqeData.address.value(),
-          wqeData.msgSizeBytes,
+          oneSge(wqeData.address.value(), wqeData.msgSizeBytes),
           wqeData.mtu.value());
       break;
     case Wqe::WorkType::kReceive: {
@@ -160,10 +159,8 @@ Wqe* QpTestBase::postWqeHelper(Qp* postQp, WqeData wqeData, bool doProcessWqe) {
           : 0;
       wqe = std::make_unique<ReceiveWqe>(
           wqeData.workReqId.value(),
-          wqeData.address.value(),
-          wqeData.msgSizeBytes,
-          wqeData.mtu.value(),
-          lkey);
+          oneSge(wqeData.address.value(), wqeData.msgSizeBytes, lkey),
+          wqeData.mtu.value());
       isRWqe = true;
       break;
     }
@@ -185,13 +182,11 @@ Wqe* QpTestBase::postWqeHelper(Qp* postQp, WqeData wqeData, bool doProcessWqe) {
       wqe = std::make_unique<ReadWriteWqe>(
           wqeData.workType,
           wqeData.workReqId.value(),
-          wqeData.address.value(),
-          wqeData.msgSizeBytes,
+          oneSge(wqeData.address.value(), wqeData.msgSizeBytes, lkey),
           wqeData.mtu.value(),
           wqeData.remote_addr.value_or((unsigned long)receiveBuffer.data()),
           wqeData.rkey.value_or(1),
-          /*send_flags=*/IBV_SEND_SIGNALED,
-          lkey);
+          /*send_flags=*/IBV_SEND_SIGNALED);
       break;
     }
     case Wqe::WorkType::kReadWithImm: {
@@ -209,14 +204,12 @@ Wqe* QpTestBase::postWqeHelper(Qp* postQp, WqeData wqeData, bool doProcessWqe) {
           : 0;
       wqe = std::make_unique<ReadWithImmWqe>(
           wqeData.workReqId.value(),
-          wqeData.address.value(),
-          wqeData.msgSizeBytes,
+          oneSge(wqeData.address.value(), wqeData.msgSizeBytes, lkey),
           wqeData.mtu.value(),
           wqeData.remote_addr.value_or((unsigned long)receiveBuffer.data()),
           wqeData.rkey.value_or(1),
           wqeData.maybeImmediateData.value(),
-          /*send_flags=*/IBV_SEND_SIGNALED,
-          lkey);
+          /*send_flags=*/IBV_SEND_SIGNALED);
       break;
     }
     case Wqe::WorkType::kAtomicFetchAdd:
@@ -237,14 +230,17 @@ Wqe* QpTestBase::postWqeHelper(Qp* postQp, WqeData wqeData, bool doProcessWqe) {
       wqe = std::make_unique<AtomicWqe>(
           wqeData.workType,
           wqeData.workReqId.value(),
-          wqeData.address.value(),
+          LocalSge{
+              .address = wqeData.address.value(),
+              .length = kAtomicOperationSizeBytes,
+              .lkey = lkey,
+          },
           wqeData.mtu.value(),
           wqeData.remote_addr.value_or((unsigned long)receiveBuffer.data()),
           wqeData.rkey.value_or(1),
           wqeData.swapOrAddData,
           wqeData.compareData,
-          /*send_flags=*/IBV_SEND_SIGNALED,
-          lkey);
+          /*send_flags=*/IBV_SEND_SIGNALED);
       break;
     }
     default:

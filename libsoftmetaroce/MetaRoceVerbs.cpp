@@ -2227,6 +2227,22 @@ void MetaRoceVerbs::tearDownQp(std::unique_ptr<Qp> qp) {
 
 namespace {
 
+LocalSges makeInlineSourceSges(std::span<const ibv_sge> sges) {
+  LocalSges result;
+  for (const ibv_sge& sge : sges) {
+    if (sge.length != 0) {
+      result.push_back({
+          // Inline addr is a virtual address, independent of the lkey.
+          // NOLINTNEXTLINE(performance-no-int-to-ptr)
+          .address = reinterpret_cast<void*>(sge.addr),
+          .length = sge.length,
+          .lkey = sge.lkey,
+      });
+    }
+  }
+  return result;
+}
+
 // Drops zero-length SGEs, which require no local memory validation.
 LocalSges resolveLocalSges(
     const MemoryRegions& memoryRegions,
@@ -2247,15 +2263,6 @@ LocalSges resolveLocalSges(
 
 } // namespace
 
-std::pair<void* FOLLY_NULLABLE, uint32_t>
-MetaRoceVerbs::addressAndLengthFromSge(const struct ibv_sge* singleSge) {
-  if (singleSge != nullptr) {
-    // NOLINTNEXTLINE(performance-no-int-to-ptr)
-    return {reinterpret_cast<void*>(singleSge->addr), singleSge->length};
-  }
-  return {nullptr, 0};
-}
-
 int MetaRoceVerbs::postSendWr(
     struct ibv_qp& ibvqp,
     Qp& qp,
@@ -2273,7 +2280,6 @@ int MetaRoceVerbs::postSendWr(
   }
   const std::span<const struct ibv_sge> sges = sgeList->sges;
   const uint32_t length = sgeList->totalLength;
-  const uint32_t lkey = sges.empty() ? 0 : sges.front().lkey;
   const bool isInline = wr.send_flags & IBV_SEND_INLINE;
   if (isInline) {
     // Inline data is copied into the WQE, so it applies only to operations that
@@ -2303,11 +2309,9 @@ int MetaRoceVerbs::postSendWr(
   static_assert(
       kMaxSgesPerWorkRequest == 1,
       "an inline payload is copied from the one sge a work request may post");
-  const LocalSges localSges =
-      isInline ? LocalSges{} : resolveLocalSges(memoryRegions_, ibvqp.pd, sges);
-  void* const addr = isInline
-      ? addressAndLengthFromSge(sges.empty() ? nullptr : sges.data()).first
-      : (localSges.empty() ? nullptr : localSges.front().address);
+  const LocalSges localSges = isInline
+      ? makeInlineSourceSges(sges)
+      : resolveLocalSges(memoryRegions_, ibvqp.pd, sges);
 
   const bool isReadWithImm = wr.opcode == IBV_WR_DRIVER1;
   const bool isRead = wr.opcode == IBV_WR_RDMA_READ;
@@ -2376,16 +2380,15 @@ int MetaRoceVerbs::postSendWr(
   std::unique_ptr<Wqe> wqe;
   if (wr.opcode == IBV_WR_SEND) {
     wqe = std::make_unique<SendWqe>(
-        wr.wr_id, addr, length, qp.getMtu(), wr.send_flags);
+        wr.wr_id, localSges, qp.getMtu(), wr.send_flags);
   } else if (wr.opcode == IBV_WR_SEND_WITH_IMM) {
     wqe = std::make_unique<SendWithImmWqe>(
-        wr.wr_id, addr, length, qp.getMtu(), wr.imm_data, wr.send_flags);
+        wr.wr_id, localSges, qp.getMtu(), wr.imm_data, wr.send_flags);
   } else if (wr.opcode == IBV_WR_RDMA_WRITE) {
     wqe = std::make_unique<ReadWriteWqe>(
         Wqe::WorkType::kWrite,
         wr.wr_id,
-        addr,
-        length,
+        localSges,
         qp.getMtu(),
         wr.wr.rdma.remote_addr,
         wr.wr.rdma.rkey,
@@ -2393,8 +2396,7 @@ int MetaRoceVerbs::postSendWr(
   } else if (wr.opcode == IBV_WR_RDMA_WRITE_WITH_IMM) {
     wqe = std::make_unique<WriteWithImmWqe>(
         wr.wr_id,
-        addr,
-        length,
+        localSges,
         qp.getMtu(),
         wr.wr.rdma.remote_addr,
         wr.wr.rdma.rkey,
@@ -2404,24 +2406,20 @@ int MetaRoceVerbs::postSendWr(
     wqe = std::make_unique<ReadWriteWqe>(
         Wqe::WorkType::kRead,
         wr.wr_id,
-        addr,
-        length,
+        localSges,
         qp.getMtu(),
         wr.wr.rdma.remote_addr,
         wr.wr.rdma.rkey,
-        wr.send_flags,
-        lkey);
+        wr.send_flags);
   } else if (isReadWithImm) {
     wqe = std::make_unique<ReadWithImmWqe>(
         wr.wr_id,
-        addr,
-        length,
+        localSges,
         qp.getMtu(),
         wr.wr.rdma.remote_addr,
         wr.wr.rdma.rkey,
         wr.imm_data,
-        wr.send_flags,
-        lkey);
+        wr.send_flags);
   } else if (isAtomic) {
     CHECK_EQ(sges.size(), 1u)
         << "an atomic with 0 or >1 sge is rejected before this point, so "
@@ -2445,14 +2443,13 @@ int MetaRoceVerbs::postSendWr(
     wqe = std::make_unique<AtomicWqe>(
         workType,
         wr.wr_id,
-        addr,
+        localSges.empty() ? LocalSge{} : localSges.front(),
         qp.getMtu(),
         wr.wr.atomic.remote_addr,
         wr.wr.atomic.rkey,
         swapOrAddData,
         compareData,
-        wr.send_flags,
-        lkey);
+        wr.send_flags);
   } else {
     LOG(ERROR) << "MetaRoceVerbs does not support post_send opcode "
                << (int)wr.opcode;
@@ -2525,16 +2522,9 @@ int MetaRoceVerbs::postRecvWr(
   // Each sge keeps its lkey, for validating the buffer when data arrives.
   const LocalSges localSges =
       resolveLocalSges(memoryRegions_, ibvqp.pd, sgeList->sges);
-  const uint32_t lkey = localSges.empty() ? 0 : localSges.front().lkey;
   auto tagNum = qpAndTagToTag(ibvqp.qp_num);
   const bool accepted = qp.postWqe(
-      tagNum,
-      std::make_unique<ReceiveWqe>(
-          wr.wr_id,
-          localSges.empty() ? nullptr : localSges.front().address,
-          sgeList->totalLength,
-          qp.getMtu(),
-          lkey));
+      tagNum, std::make_unique<ReceiveWqe>(wr.wr_id, localSges, qp.getMtu()));
 
   if (!accepted) {
     LOG_FIRST_N(WARNING, 10)

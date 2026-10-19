@@ -402,11 +402,6 @@ class MetaRoceVerbs : public RdmaVerbs, public folly::NonCopyableNonMovable {
       SharedReceiveTaker refused,
       uint16_t postedCsn);
 
-  // The SGE's address and length only. Does not touch the memory regions, so a
-  // caller that will not read through the local key never triggers a lookup.
-  std::pair<void* FOLLY_NULLABLE, uint32_t> addressAndLengthFromSge(
-      const struct ibv_sge* singleSge);
-
   // Posts one work request of a chain: 0, or the errno that refuses it.
   int postSendWr(struct ibv_qp& ibvqp, Qp& qp, const struct ibv_send_wr& wr);
   int postRecvWr(struct ibv_qp& ibvqp, Qp& qp, const struct ibv_recv_wr& wr);

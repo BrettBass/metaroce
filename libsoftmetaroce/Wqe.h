@@ -35,6 +35,7 @@
 #include <libsoftmetaroce/Cqe.h>
 #include <libsoftmetaroce/PosnAuditor.h>
 #include <libsoftmetaroce/RejectedPosnSet.h>
+#include <libsoftmetaroce/SgeList.h>
 
 namespace libsoftmetaroce {
 
@@ -611,6 +612,8 @@ struct Wqe {
   void deliverPosn(uint32_t posn, uint16_t mtu, folly::ByteRange bytes);
 
  protected:
+  // Responder-side work, whose buffer a request's remote address identifies,
+  // or which has none.
   explicit Wqe(
       WorkType workType,
       std::optional<uint64_t> workReqId, // not present in VirtualReceiveWqes
@@ -619,11 +622,7 @@ struct Wqe {
       uint32_t size,
       uint16_t mtu,
       bool isVirtual,
-      std::optional<uint32_t> immediateData,
-      // When set, the payload at `address` is copied into the WQE and owned by
-      // it, so the caller may free or overwrite its source the moment the post
-      // returns; the local key is never consulted for inline data.
-      bool isInline = false)
+      std::optional<uint32_t> immediateData)
       : workType_(workType),
         maybeWorkReqId_(workReqId),
         maybeMsn_(msn),
@@ -632,14 +631,37 @@ struct Wqe {
         address_(address),
         sizeBytes_(size),
         maybeImmediateData_(immediateData) {
-    if (isInline && size > 0) {
-      inlineData_.assign(
-          static_cast<const uint8_t*>(address),
-          static_cast<const uint8_t*>(address) + size);
-      address_ = inlineData_.data();
-    }
     CHECK_NE(mtu, 0);
     updateMtu(mtu);
+  }
+
+  // Posted work, whose buffer is the sges the caller posted.
+  explicit Wqe(
+      WorkType workType,
+      std::optional<uint64_t> workReqId,
+      std::optional<uint16_t> msn, // not initialized with ReceiveWqes
+      const LocalSges& sges,
+      uint16_t mtu,
+      bool isVirtual,
+      std::optional<uint32_t> immediateData,
+      // When set, the WQE owns a copy of the payload, so the caller may reuse
+      // its sources once the post returns; no lkey is consulted.
+      bool isInline = false)
+      : Wqe(workType,
+            workReqId,
+            msn,
+            sges.empty() ? nullptr : sges.front().address,
+            totalSgeLength(sges),
+            mtu,
+            isVirtual,
+            immediateData) {
+    CHECK_LE(sges.size(), 1u) << "this WQE supports at most one SGE";
+    if (isInline && sizeBytes_ > 0) {
+      inlineData_.assign(
+          static_cast<const uint8_t*>(address_),
+          static_cast<const uint8_t*>(address_) + sizeBytes_);
+      address_ = inlineData_.data();
+    }
   }
 
   // address_ can alias the owned inlineData_ buffer (inline WQEs), so a copy or
@@ -699,15 +721,13 @@ struct Wqe {
 struct SendWqe : public Wqe {
   explicit SendWqe(
       uint64_t workReqId,
-      void* address,
-      uint32_t size,
+      const LocalSges& sges,
       uint16_t mtu,
       int send_flags = IBV_SEND_SIGNALED)
       : Wqe(WorkType::kSend,
             workReqId,
             std::nullopt, /* msn */
-            address,
-            size,
+            sges,
             mtu,
             false, /* isVirtual */
             std::nullopt, /*immediateData*/
@@ -724,12 +744,11 @@ struct SendWqe : public Wqe {
 struct SendWithImmWqe : public SendWqe {
   explicit SendWithImmWqe(
       uint64_t workReqId,
-      void* address,
-      uint32_t size,
+      const LocalSges& sges,
       uint16_t mtu,
       uint32_t immediateData,
       int send_flags = IBV_SEND_SIGNALED)
-      : SendWqe(workReqId, address, size, mtu, send_flags) {
+      : SendWqe(workReqId, sges, mtu, send_flags) {
     setImmediateData(immediateData);
     workType_ = WorkType::kSendWithImm;
   }
@@ -737,21 +756,15 @@ struct SendWithImmWqe : public SendWqe {
 };
 
 struct ReceiveWqe : public Wqe {
-  explicit ReceiveWqe(
-      uint64_t workReqId,
-      void* address,
-      uint32_t size,
-      uint16_t mtu,
-      uint32_t lkey = 0)
+  explicit ReceiveWqe(uint64_t workReqId, const LocalSges& sges, uint16_t mtu)
       : Wqe(WorkType::kReceive,
             workReqId,
             std::nullopt, /* msn */
-            address,
-            size,
+            sges,
             mtu,
             false, /* isVirtual */
             std::nullopt /*immediateData*/),
-        lkey_(lkey) {}
+        lkey_(sges.empty() ? 0 : sges.front().lkey) {}
   ~ReceiveWqe() override = default;
 
   // Kept only so the responder can validate the receive buffer lazily, when
@@ -873,24 +886,21 @@ struct ReadWriteWqe : public Wqe {
   explicit ReadWriteWqe(
       WorkType workType,
       uint64_t workReqId,
-      void* address,
-      uint32_t size,
+      const LocalSges& sges,
       uint16_t mtu,
       uint64_t remoteAddress,
       uint32_t rkey,
-      int send_flags = IBV_SEND_SIGNALED,
-      uint32_t lkey = 0)
+      int send_flags = IBV_SEND_SIGNALED)
       : Wqe(workType,
             workReqId,
             std::nullopt, /* msn */
-            address,
-            size,
+            sges,
             mtu,
             false, /* isVirtual */
             std::nullopt, /*immediateData*/
             (send_flags & IBV_SEND_INLINE) != 0),
         rdma_(remoteAddress, rkey),
-        lkey_(lkey) {
+        lkey_(sges.empty() ? 0 : sges.front().lkey) {
     if (workType != WorkType::kRead && workType != WorkType::kReadWithImm &&
         workType != WorkType::kWrite && workType != WorkType::kWriteWithImm) {
       throw std::runtime_error("Invalid work type for ReadWriteWqe");
@@ -928,8 +938,7 @@ struct ReadWriteWqe : public Wqe {
 struct WriteWithImmWqe : public ReadWriteWqe {
   explicit WriteWithImmWqe(
       uint64_t workReqId,
-      void* address,
-      uint32_t size,
+      const LocalSges& sges,
       uint16_t mtu,
       uint64_t remoteAddress,
       uint32_t rkey,
@@ -938,8 +947,7 @@ struct WriteWithImmWqe : public ReadWriteWqe {
       : ReadWriteWqe(
             WorkType::kWriteWithImm,
             workReqId,
-            address,
-            size,
+            sges,
             mtu,
             remoteAddress,
             rkey,
@@ -955,24 +963,20 @@ struct WriteWithImmWqe : public ReadWriteWqe {
 struct ReadWithImmWqe : public ReadWriteWqe {
   explicit ReadWithImmWqe(
       uint64_t workReqId,
-      void* address,
-      uint32_t size,
+      const LocalSges& sges,
       uint16_t mtu,
       uint64_t remoteAddress,
       uint32_t rkey,
       uint32_t immediateData,
-      int send_flags = IBV_SEND_SIGNALED,
-      uint32_t lkey = 0)
+      int send_flags = IBV_SEND_SIGNALED)
       : ReadWriteWqe(
             WorkType::kReadWithImm,
             workReqId,
-            address,
-            size,
+            sges,
             mtu,
             remoteAddress,
             rkey,
-            send_flags,
-            lkey) {
+            send_flags) {
     setImmediateData(immediateData);
   }
   ~ReadWithImmWqe() override = default;
@@ -1012,19 +1016,22 @@ struct AtomicWqe : public Wqe {
   explicit AtomicWqe(
       WorkType workType,
       uint64_t workReqId,
-      void* localBuffer,
+      const LocalSge& localBuffer,
       uint16_t mtu,
       uint64_t remoteAddress,
       uint32_t rkey,
       uint64_t swapOrAddData,
       uint64_t compareData,
-      int send_flags,
-      uint32_t lkey)
+      int send_flags)
       : Wqe(workType,
             workReqId,
             std::nullopt, /* msn */
-            localBuffer,
-            8, /* atomic ops always operate on 8 bytes */
+            // Atomic ops always operate on 8 bytes, whatever length was posted.
+            LocalSges{{
+                .address = localBuffer.address,
+                .length = 8,
+                .lkey = localBuffer.lkey,
+            }},
             mtu,
             false, /* isVirtual */
             std::nullopt /*immediateData*/),
@@ -1032,7 +1039,7 @@ struct AtomicWqe : public Wqe {
         rkey_(rkey),
         swapOrAddData_(swapOrAddData),
         compareData_(compareData),
-        lkey_(lkey) {
+        lkey_(localBuffer.lkey) {
     if (workType != WorkType::kAtomicFetchAdd &&
         workType != WorkType::kAtomicCmpSwp) {
       throw std::runtime_error("Invalid work type for AtomicWqe");

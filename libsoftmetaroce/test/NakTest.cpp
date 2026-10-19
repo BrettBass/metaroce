@@ -28,6 +28,7 @@
 #include <libsoftmetaroce/test/LimitedTestSender.h>
 #include <libsoftmetaroce/test/MockCongestionController.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -170,7 +171,7 @@ class NakTest : public Test {
     ASSERT_TRUE(qp->postWqe(
         kMetaRoceInitialTag,
         std::make_unique<SendWqe>(
-            0 /* workReqId */, payload, length, qp->getMtu())));
+            0 /* workReqId */, oneSge(payload, length), qp->getMtu())));
   }
 
   HighResTimer retxTimer;
@@ -629,15 +630,13 @@ TEST_F(NakTest, NakFatalErrorCompletesTheTagsWqesOnceTheirPacketsSettle) {
       kMetaRoceInitialTag,
       std::make_unique<SendWqe>(
           100 /* workReqId */,
-          payload1.get(),
-          kFramesPerWqe * qp->getMtu(),
+          oneSge(payload1.get(), kFramesPerWqe * qp->getMtu()),
           qp->getMtu())));
   ASSERT_TRUE(qp->postWqe(
       kMetaRoceInitialTag,
       std::make_unique<SendWqe>(
           101 /* workReqId */,
-          payload2.get(),
-          kFramesPerWqe * qp->getMtu(),
+          oneSge(payload2.get(), kFramesPerWqe * qp->getMtu()),
           qp->getMtu())));
 
   qp->startProcessingWqes();
@@ -759,8 +758,7 @@ TEST_F(NakTest, FatalNakConcurrentWithSendLoopLeavesSentWorkAlive) {
         kMetaRoceInitialTag,
         std::make_unique<SendWqe>(
             1000 + i,
-            payloads.back().get(),
-            kFramesPerWqe * qp->getMtu(),
+            oneSge(payloads.back().get(), kFramesPerWqe * qp->getMtu()),
             qp->getMtu())));
   }
 
@@ -875,8 +873,7 @@ TEST_F(NakTest, WqePostedAfterFatalNakIsFlushedBehindTheFailingWqe) {
       kMetaRoceInitialTag,
       std::make_unique<SendWqe>(
           kFirstWrId,
-          payload1.get(),
-          kFramesPerWqe * qp->getMtu(),
+          oneSge(payload1.get(), kFramesPerWqe * qp->getMtu()),
           qp->getMtu())));
 
   qp->startProcessingWqes();
@@ -905,8 +902,7 @@ TEST_F(NakTest, WqePostedAfterFatalNakIsFlushedBehindTheFailingWqe) {
       kMetaRoceInitialTag,
       std::make_unique<SendWqe>(
           kSecondWrId,
-          payload2.get(),
-          kFramesPerWqe * qp->getMtu(),
+          oneSge(payload2.get(), kFramesPerWqe * qp->getMtu()),
           qp->getMtu())));
 
   // A receive as well, on its own work queue rather than behind the sends.
@@ -915,8 +911,7 @@ TEST_F(NakTest, WqePostedAfterFatalNakIsFlushedBehindTheFailingWqe) {
       kMetaRoceInitialTag,
       std::make_unique<ReceiveWqe>(
           kReceiveWrId,
-          recvPayload.get(),
-          kFramesPerWqe * qp->getMtu(),
+          oneSge(recvPayload.get(), kFramesPerWqe * qp->getMtu()),
           qp->getMtu())));
 
   // All three report; pollCq() blocks until the first WQE has settled.

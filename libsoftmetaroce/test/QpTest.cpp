@@ -30,6 +30,7 @@
 #include <libsoftmetaroce/test/LimitedTestSender.h>
 #include <libsoftmetaroce/test/MockCongestionController.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 #include <libsoftmetaroce/test/PostToTag.h>
 #include <libsoftmetaroce/test/QpTestBase.h>
 #include <libsoftmetaroce/test/TxTimerSuppressor.h>
@@ -375,8 +376,7 @@ TEST_F(QpTest, RtoWithQueuedPacketsKeepsTimerArmed) {
 
   constexpr uint16_t kFrames = 4;
   std::vector<char> payload(kFrames * mtu);
-  auto wqe = std::make_unique<SendWqe>(
-      23 /*workReqId*/, payload.data(), payload.size(), mtu);
+  auto wqe = std::make_unique<SendWqe>(23 /*workReqId*/, oneSge(payload), mtu);
   wqe->setMsn(initialTag->getAndIncrementNextMsn());
   wqe->setCsn(initialTag->getAndIncrementNextCsn());
 
@@ -462,8 +462,7 @@ TEST_F(QpTest, RtoRequeuesQpAfterEagain) {
 
   constexpr uint16_t kFrames = 2;
   std::vector<char> payload(kFrames * mtu);
-  auto wqe = std::make_unique<SendWqe>(
-      26 /*workReqId*/, payload.data(), payload.size(), mtu);
+  auto wqe = std::make_unique<SendWqe>(26 /*workReqId*/, oneSge(payload), mtu);
   wqe->setMsn(initialTag->getAndIncrementNextMsn());
   wqe->setCsn(initialTag->getAndIncrementNextCsn());
 
@@ -1269,8 +1268,8 @@ TEST_F(QpTest, AFrameSelectivelyAckedWhileQueuedIsNotRetransmitted) {
   constexpr int kFrames = 4;
   const uint32_t length = kFrames * mtu;
   auto payload = std::make_unique<char[]>(length);
-  auto wqe =
-      std::make_unique<SendWqe>(23 /*workReqId*/, payload.get(), length, mtu);
+  auto wqe = std::make_unique<SendWqe>(
+      23 /*workReqId*/, oneSge(payload.get(), length), mtu);
   wqe->setMsn(initialTag->getAndIncrementNextMsn());
   wqe->setCsn(initialTag->getAndIncrementNextCsn());
 
@@ -1371,8 +1370,8 @@ struct TrackedMessageFixture {
 
     const uint32_t length = messageFrames * mtu;
     payload = std::make_unique<char[]>(length);
-    wqe =
-        std::make_unique<SendWqe>(23 /*workReqId*/, payload.get(), length, mtu);
+    wqe = std::make_unique<SendWqe>(
+        23 /*workReqId*/, oneSge(payload.get(), length), mtu);
     wqe->setMsn(initialTag->getAndIncrementNextMsn());
     wqe->setCsn(initialTag->getAndIncrementNextCsn());
 
@@ -1418,7 +1417,7 @@ TEST_F(QpTest, RetiringTheWindowHeadDoesNotStopAtAnAlreadyAckedFrame) {
   // Frame 12 belongs to a message that is doing nothing wrong, so it stays in
   // flight and the window must stop there.
   auto healthyWqe = std::make_unique<SendWqe>(
-      24 /*workReqId*/, fixture.payload.get(), mtu, mtu);
+      24 /*workReqId*/, oneSge(fixture.payload.get(), mtu), mtu);
   healthyWqe->setMsn(initialTag->getAndIncrementNextMsn());
   healthyWqe->setCsn(initialTag->getAndIncrementNextCsn());
   txState.tracker.emplace_back(
@@ -3983,8 +3982,9 @@ TEST_F(QpTest, ProcessAnAckPacket) {
   auto payload = std::make_unique<char[]>(length);
   auto wqe = std::make_unique<SendWqe>(
       23 /*workReqId*/,
-      payload.get(), /*address*/
-      length,
+      oneSge(
+          payload.get(), /*address*/
+          length),
       mtu);
   wqe->setMsn(initialTag->getAndIncrementNextMsn());
   wqe->setCsn(initialTag->getAndIncrementNextCsn());
@@ -4348,7 +4348,7 @@ TEST_F(QpTest, MarkedTagFlushesNewWqeWithoutConsumingMsn) {
   // Process the WQE directly (rather than via the async pump) so the marked-tag
   // rejection is exercised synchronously.
   auto payload = std::make_unique<char[]>(mtu);
-  auto wqe = std::make_unique<SendWqe>(kWrId, payload.get(), mtu, mtu);
+  auto wqe = std::make_unique<SendWqe>(kWrId, oneSge(payload.get(), mtu), mtu);
   EXPECT_FALSE(postToTag(*initialTag, std::move(wqe), mtu))
       << "a marked tag must reject the WQE, not signal ready to transmit";
 
@@ -5231,16 +5231,14 @@ TEST_F(QpTest, TwoWQEsTxSideUnorderedCompletion) {
   auto payload = std::make_unique<char[]>(mtu * 2);
   auto wqe1 = std::make_unique<SendWqe>(
       23 /*workReqId*/,
-      payload.get(), /*address*/
-      mtu * 2, // length = 2 packets
+      oneSge(payload.get(), mtu * 2), // 2 packets
       mtu);
   Wqe* rawWqe1 = wqe1.get();
   ASSERT_TRUE(qp.postWqe(kMetaRoceInitialTag, std::move(wqe1)));
 
   auto wqe2 = std::make_unique<SendWqe>(
       24 /*workReqId*/,
-      payload.get(), /*address*/
-      mtu, // length = 1 packets
+      oneSge(payload.get(), mtu), // 1 packet
       mtu);
   Wqe* rawWqe2 = wqe2.get();
   ASSERT_TRUE(qp.postWqe(kMetaRoceInitialTag, std::move(wqe2)));
@@ -6206,8 +6204,9 @@ TEST_F(QpTest, ProcessAckPacketWithRnrBitVector) {
   auto payload = std::make_unique<char[]>(length);
   auto existingWqe = std::make_unique<SendWqe>(
       23 /* workReqId */,
-      payload.get(), /*address*/
-      length,
+      oneSge(
+          payload.get(), /*address*/
+          length),
       mtu);
   existingWqe->setMsn(initialTag->getAndIncrementNextMsn());
   existingWqe->setCsn(initialTag->getAndIncrementNextCsn());
@@ -6215,8 +6214,9 @@ TEST_F(QpTest, ProcessAckPacketWithRnrBitVector) {
 
   auto nonExistingWqe = std::make_unique<SendWqe>(
       23 /*workReqId*/,
-      payload.get(), /*address*/
-      length, /*length*/
+      oneSge(
+          payload.get(), /*address*/
+          length), /*length*/
       mtu);
   nonExistingWqe->setMsn(initialTag->getAndIncrementNextMsn());
   nonExistingWqe->setCsn(initialTag->getAndIncrementNextCsn());
@@ -6322,11 +6322,13 @@ TEST_F(QpTest, ProcessBrnrAckPausesEachFramesOwnTag) {
   // mis-attributes both to a single tag is caught.
   constexpr uint16_t msn0 = 3;
   constexpr uint16_t msn1 = 1;
-  auto wqe0 = std::make_unique<SendWqe>(23, receiveBuffer.data(), mtu, mtu);
+  auto wqe0 =
+      std::make_unique<SendWqe>(23, oneSge(receiveBuffer.data(), mtu), mtu);
   wqe0->setMsn(msn0);
   ASSERT_TRUE(allocatePosns(*wqe0, 1));
 
-  auto wqe1 = std::make_unique<SendWqe>(24, receiveBuffer.data(), mtu, mtu);
+  auto wqe1 =
+      std::make_unique<SendWqe>(24, oneSge(receiveBuffer.data(), mtu), mtu);
   wqe1->setMsn(msn1);
   ASSERT_TRUE(allocatePosns(*wqe1, 1));
 
@@ -6400,8 +6402,8 @@ struct BrnrPerCsnFixture {
     txState->sndNxt = 10 + count;
     for (int i = 0; i < count; ++i) {
       payloads.push_back(std::make_unique<char[]>(mtu));
-      auto wqe =
-          std::make_unique<SendWqe>(100 + i, payloads.back().get(), mtu, mtu);
+      auto wqe = std::make_unique<SendWqe>(
+          100 + i, oneSge(payloads.back().get(), mtu), mtu);
       wqe->setMsn(tag->getAndIncrementNextMsn());
       wqe->setCsn(tag->getAndIncrementNextCsn());
       msns.push_back(wqe->getMsn().value());
@@ -6829,7 +6831,8 @@ TEST_F(QpTest, ProcessAckWithUnknownTagStillAdvancesFsn) {
   qp.setupFlows(1, 1, &mockSender);
   auto flow = qp.getTxFlowById(0);
 
-  auto wqe0 = std::make_unique<SendWqe>(23, receiveBuffer.data(), mtu, mtu);
+  auto wqe0 =
+      std::make_unique<SendWqe>(23, oneSge(receiveBuffer.data(), mtu), mtu);
   wqe0->setMsn(3);
   ASSERT_TRUE(allocatePosns(*wqe0, 1));
 
@@ -6885,11 +6888,12 @@ TEST_F(QpTest, ProcessAckExitsBrnrBackoffOnlyWhenBlockedOutboundMsnAcked) {
   qp.setupFlows(1, 1, &mockSender);
   auto flow = qp.getTxFlowById(0);
 
-  auto wqeBelow = std::make_unique<SendWqe>(23, receiveBuffer.data(), mtu, mtu);
+  auto wqeBelow =
+      std::make_unique<SendWqe>(23, oneSge(receiveBuffer.data(), mtu), mtu);
   wqeBelow->setMsn(kBelowBlockMsn);
   ASSERT_TRUE(allocatePosns(*wqeBelow, 1));
   auto wqeAboveBlock =
-      std::make_unique<SendWqe>(24, receiveBuffer.data(), mtu, mtu);
+      std::make_unique<SendWqe>(24, oneSge(receiveBuffer.data(), mtu), mtu);
   wqeAboveBlock->setMsn(kAboveBlockMsn);
   ASSERT_TRUE(allocatePosns(*wqeAboveBlock, 1));
 
@@ -6956,7 +6960,8 @@ TEST_F(QpTest, ProcessAckClearsHrnrWithoutClearingUnrelatedBrnrBlock) {
 
   qp.setHrnrState(HrnrState::HRNR_BLOCKED_TX);
 
-  auto wqe0 = std::make_unique<SendWqe>(23, receiveBuffer.data(), mtu, mtu);
+  auto wqe0 =
+      std::make_unique<SendWqe>(23, oneSge(receiveBuffer.data(), mtu), mtu);
   wqe0->setMsn(kBelowBlockMsn);
   ASSERT_TRUE(allocatePosns(*wqe0, 1));
 
@@ -7015,24 +7020,27 @@ TEST_F(QpTest, ProcessAckPacketWithMultipleRnrMsns) {
   // Create WQEs with different MSNs
   auto wqe1 = std::make_unique<SendWqe>(
       23 /*workReqId*/,
-      payload.get(), /*address*/
-      length,
+      oneSge(
+          payload.get(), /*address*/
+          length),
       mtu);
   wqe1->setMsn(30);
   ASSERT_TRUE(allocatePosns(*wqe1, 10));
 
   auto wqe2 = std::make_unique<SendWqe>(
       24 /*workReqId*/,
-      payload.get(), /*address*/
-      length,
+      oneSge(
+          payload.get(), /*address*/
+          length),
       mtu);
   wqe2->setMsn(20);
   ASSERT_TRUE(allocatePosns(*wqe2, 10));
 
   auto wqe3 = std::make_unique<SendWqe>(
       25 /*workReqId*/,
-      payload.get(), /*address*/
-      length,
+      oneSge(
+          payload.get(), /*address*/
+          length),
       mtu);
   wqe3->setMsn(10);
   ASSERT_TRUE(allocatePosns(*wqe3, 10));
@@ -7132,8 +7140,9 @@ TEST_F(QpTest, ProcessAckPacketWithContiguousAckRnrSequence) {
   // Create a WQE
   auto wqe = std::make_unique<SendWqe>(
       23 /*workReqId*/,
-      payload.get(), /*address*/
-      length,
+      oneSge(
+          payload.get(), /*address*/
+          length),
       mtu);
   wqe->setMsn(0);
   ASSERT_TRUE(allocatePosns(*wqe, 20));
@@ -7232,8 +7241,8 @@ TEST_F(QpTest, AnAlternatingBrnrAndSackReturnsOnlyTheRefusedPosns) {
   constexpr uint32_t kFrames = 10;
   const uint32_t length = kFrames * mtu;
   auto payload = std::make_unique<char[]>(length);
-  auto wqe =
-      std::make_unique<SendWqe>(23 /*workReqId*/, payload.get(), length, mtu);
+  auto wqe = std::make_unique<SendWqe>(
+      23 /*workReqId*/, oneSge(payload.get(), length), mtu);
   wqe->setMsn(0);
 
   auto& txState = flow->getTxState();
@@ -9575,8 +9584,8 @@ struct SackRetxTestFixture {
 
     const uint32_t length = 20 * mtu;
     payload = std::make_unique<char[]>(length);
-    wqe =
-        std::make_unique<SendWqe>(23 /*workReqId*/, payload.get(), length, mtu);
+    wqe = std::make_unique<SendWqe>(
+        23 /*workReqId*/, oneSge(payload.get(), length), mtu);
     wqe->setMsn(initialTag->getAndIncrementNextMsn());
     wqe->setCsn(initialTag->getAndIncrementNextCsn());
 
@@ -9882,7 +9891,7 @@ void setupLargeTracker(
     uint16_t numFsns = 48) {
   const uint32_t length = (numFsns + 1) * mtu;
   f.payload = std::make_unique<char[]>(length);
-  f.wqe = std::make_unique<SendWqe>(23, f.payload.get(), length, mtu);
+  f.wqe = std::make_unique<SendWqe>(23, oneSge(f.payload.get(), length), mtu);
   f.wqe->setMsn(initialTag->getAndIncrementNextMsn());
   f.wqe->setCsn(initialTag->getAndIncrementNextCsn());
 
@@ -11184,22 +11193,22 @@ TEST_F(QpTest, AReceiveMissRecordsTheRnrCancelRequestOnItsOwnTag) {
   // A post clears its tag's RNR-Cancel request and returns the csn the cancel
   // reports, so posting to each tag shows which tag the miss recorded.
   auto deliveredBuffer = std::make_unique<char[]>(mtu);
-  EXPECT_FALSE(
-      postReceiveToTag(
-          *qp.getTag(kDeliveredTag),
-          std::make_unique<ReceiveWqe>(1, deliveredBuffer.get(), mtu, mtu),
-          mtu)
-          .has_value())
+  EXPECT_FALSE(postReceiveToTag(
+                   *qp.getTag(kDeliveredTag),
+                   std::make_unique<ReceiveWqe>(
+                       1, oneSge(deliveredBuffer.get(), mtu), mtu),
+                   mtu)
+                   .has_value())
       << "this tag bound its receive, so a cancel here would claim it refused "
          "a message though the ACK's BRNR came from the other tag";
 
   auto refusedBuffer = std::make_unique<char[]>(mtu);
-  EXPECT_TRUE(
-      postReceiveToTag(
-          *qp.getTag(kMetaRoceInitialTag),
-          std::make_unique<ReceiveWqe>(2, refusedBuffer.get(), mtu, mtu),
-          mtu)
-          .has_value())
+  EXPECT_TRUE(postReceiveToTag(
+                  *qp.getTag(kMetaRoceInitialTag),
+                  std::make_unique<ReceiveWqe>(
+                      2, oneSge(refusedBuffer.get(), mtu), mtu),
+                  mtu)
+                  .has_value())
       << "the initiator is backed off on the refused tag, so the post to it "
          "must produce the RNR-Cancel";
 }

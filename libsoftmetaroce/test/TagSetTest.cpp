@@ -45,6 +45,7 @@
 #include <libsoftmetaroce/QpState.h>
 #include <libsoftmetaroce/TagSet.h>
 #include <libsoftmetaroce/Wqe.h>
+#include <libsoftmetaroce/test/OneSge.h>
 #include <libsoftmetaroce/test/PostToTag.h>
 
 using namespace ::testing;
@@ -100,8 +101,7 @@ class TagSetTest : public ::testing::Test {
     return std::make_unique<ReadWriteWqe>(
         Wqe::WorkType::kRead,
         workReqId,
-        buffer_->data(),
-        kMtu,
+        oneSge(buffer_->data(), kMtu),
         kMtu,
         /*remoteAddr=*/0x1000,
         ibvMr_->rkey);
@@ -319,8 +319,8 @@ TEST_F(TagSetTest, PostWqe) {
   tagSet_->add(1, cqs_[0].get(), ibvQp_);
 
   // Create and post a WQE
-  auto sendWqe =
-      std::make_unique<SendWqe>(kWorkReqId, buffer_->data(), 1000, kMtu);
+  auto sendWqe = std::make_unique<SendWqe>(
+      kWorkReqId, oneSge(buffer_->data(), 1000), kMtu);
 
   tagSet_->postWqe(1, std::move(sendWqe));
 
@@ -335,12 +335,12 @@ TEST_F(TagSetTest, PostMultipleWqes) {
   tagSet_->add(2, cqs_[1].get(), ibvQp_);
 
   // Post WQEs to different tags
-  auto sendWqe1 =
-      std::make_unique<SendWqe>(kWorkReqId, buffer_->data(), 1000, kMtu);
-  auto sendWqe2 =
-      std::make_unique<SendWqe>(kWorkReqId + 1, buffer_->data(), 2000, kMtu);
-  auto sendWqe3 =
-      std::make_unique<SendWqe>(kWorkReqId + 2, buffer_->data(), 1500, kMtu);
+  auto sendWqe1 = std::make_unique<SendWqe>(
+      kWorkReqId, oneSge(buffer_->data(), 1000), kMtu);
+  auto sendWqe2 = std::make_unique<SendWqe>(
+      kWorkReqId + 1, oneSge(buffer_->data(), 2000), kMtu);
+  auto sendWqe3 = std::make_unique<SendWqe>(
+      kWorkReqId + 2, oneSge(buffer_->data(), 1500), kMtu);
 
   tagSet_->postWqe(1, std::move(sendWqe1));
   tagSet_->postWqe(2, std::move(sendWqe2));
@@ -351,8 +351,8 @@ TEST_F(TagSetTest, PostMultipleWqes) {
 
 TEST_F(TagSetTest, PostWqeNonExistentTag) {
   // Create WQE for tag that doesn't exist
-  auto sendWqe =
-      std::make_unique<SendWqe>(kWorkReqId, buffer_->data(), 1000, kMtu);
+  auto sendWqe = std::make_unique<SendWqe>(
+      kWorkReqId, oneSge(buffer_->data(), 1000), kMtu);
 
   // This should throw an exception since the tag doesn't exist
   EXPECT_THROW(tagSet_->postWqe(99, std::move(sendWqe)), std::out_of_range);
@@ -368,12 +368,12 @@ TEST_F(TagSetTest, GetNumPendingWqes) {
   EXPECT_EQ(tagSet_->getNumPendingWqes(), 0);
 
   // Process WQEs to make them pending in tags
-  auto sendWqe1 =
-      std::make_unique<SendWqe>(kWorkReqId, buffer_->data(), 1000, kMtu);
-  auto sendWqe2 =
-      std::make_unique<SendWqe>(kWorkReqId + 1, buffer_->data(), 2000, kMtu);
-  auto sendWqe3 =
-      std::make_unique<SendWqe>(kWorkReqId + 2, buffer_->data(), 1500, kMtu);
+  auto sendWqe1 = std::make_unique<SendWqe>(
+      kWorkReqId, oneSge(buffer_->data(), 1000), kMtu);
+  auto sendWqe2 = std::make_unique<SendWqe>(
+      kWorkReqId + 1, oneSge(buffer_->data(), 2000), kMtu);
+  auto sendWqe3 = std::make_unique<SendWqe>(
+      kWorkReqId + 2, oneSge(buffer_->data(), 1500), kMtu);
 
   // Process WQEs directly in tags
   auto tag1 = tagSet_->at(1);
@@ -400,10 +400,10 @@ TEST_F(TagSetTest, GetNumPendingRWqes) {
   EXPECT_EQ(tagSet_->getNumPendingRWqes(), 0);
 
   // Process receive WQEs to make them pending in tags
-  auto receiveWqe1 =
-      std::make_unique<ReceiveWqe>(kWorkReqId, buffer_->data(), 1000, kMtu);
-  auto receiveWqe2 =
-      std::make_unique<ReceiveWqe>(kWorkReqId + 1, buffer_->data(), 2000, kMtu);
+  auto receiveWqe1 = std::make_unique<ReceiveWqe>(
+      kWorkReqId, oneSge(buffer_->data(), 1000), kMtu);
+  auto receiveWqe2 = std::make_unique<ReceiveWqe>(
+      kWorkReqId + 1, oneSge(buffer_->data(), 2000), kMtu);
 
   // Process WQEs directly in tags
   auto tag1 = tagSet_->at(1);
@@ -430,12 +430,12 @@ TEST_F(TagSetTest, FindNextWqeRoundRobin) {
   auto tag2 = tagSet_->at(2);
   auto tag3 = tagSet_->at(3);
 
-  auto sendWqe1 =
-      std::make_unique<SendWqe>(kWorkReqId, buffer_->data(), 1000, kMtu);
-  auto sendWqe2 =
-      std::make_unique<SendWqe>(kWorkReqId + 1, buffer_->data(), 2000, kMtu);
-  auto sendWqe3 =
-      std::make_unique<SendWqe>(kWorkReqId + 2, buffer_->data(), 1500, kMtu);
+  auto sendWqe1 = std::make_unique<SendWqe>(
+      kWorkReqId, oneSge(buffer_->data(), 1000), kMtu);
+  auto sendWqe2 = std::make_unique<SendWqe>(
+      kWorkReqId + 1, oneSge(buffer_->data(), 2000), kMtu);
+  auto sendWqe3 = std::make_unique<SendWqe>(
+      kWorkReqId + 2, oneSge(buffer_->data(), 1500), kMtu);
 
   // Process WQEs in tags
   postToTag(*tag1, std::move(sendWqe1), kMtu);
@@ -512,8 +512,8 @@ TEST_F(TagSetTest, ProcessWqesBasic) {
       /*qpNum=*/0, []() { return std::unique_ptr<EgressPacket>(); });
 
   // Post a WQE
-  auto sendWqe =
-      std::make_unique<SendWqe>(kWorkReqId, buffer_->data(), 1000, kMtu);
+  auto sendWqe = std::make_unique<SendWqe>(
+      kWorkReqId, oneSge(buffer_->data(), 1000), kMtu);
   tagSet_->postWqe(1, std::move(sendWqe));
 
   // Start processWqes in a coroutine (it runs indefinitely, so we need to test
@@ -559,7 +559,8 @@ TEST_F(TagSetTest, PostingToATagInErrorFlushesWithoutCountingItsPosns) {
       /*qpNum=*/0, []() { return std::unique_ptr<EgressPacket>(); });
   tagSet_->postWqe(
       1,
-      std::make_unique<SendWqe>(kWorkReqId, buffer_->data(), 2 * kMtu, kMtu));
+      std::make_unique<SendWqe>(
+          kWorkReqId, oneSge(buffer_->data(), 2 * kMtu), kMtu));
 
   // The completion is what says the post was processed, so the test waits for
   // it and then cancels the loop.
@@ -690,8 +691,8 @@ TEST_F(TagSetTest, TheSendersVisitFailsTheWqesOfATagInError) {
   tagSet_->add(1, cqs_[0].get(), &mockQp);
   auto tag = tagSet_->at(1);
 
-  auto sendWqe =
-      std::make_unique<SendWqe>(kWorkReqId, buffer_->data(), 2 * kMtu, kMtu);
+  auto sendWqe = std::make_unique<SendWqe>(
+      kWorkReqId, oneSge(buffer_->data(), 2 * kMtu), kMtu);
   Wqe* postedWqe = sendWqe.get();
   postToTag(*tag, std::move(sendWqe), kMtu);
   tagSet_->addUnsentPosns(postedWqe->getNumPosn());
@@ -733,8 +734,8 @@ TEST_F(TagSetTest, ErroringTheWholeQpLeavesItsWorkForTheSendersVisit) {
   tagSet_->add(1, cqs_[0].get(), &mockQp);
   auto tag = tagSet_->at(1);
 
-  auto sendWqe =
-      std::make_unique<SendWqe>(kWorkReqId, buffer_->data(), kMtu, kMtu);
+  auto sendWqe = std::make_unique<SendWqe>(
+      kWorkReqId, oneSge(buffer_->data(), kMtu), kMtu);
   postToTag(*tag, std::move(sendWqe), kMtu);
   ASSERT_EQ(tag->getNumPendingWqes(), 1)
       << "precondition: the work request is pending before the transition, or "
@@ -766,7 +767,7 @@ TEST_F(TagSetTest, DestroyingATagDoesNotCancelAnErrorThatCameFirst) {
   ASSERT_NE(tag, nullptr);
 
   auto sendWqe = std::make_unique<SendWqe>(
-      /*workReqId=*/7, nullptr, 0, /*mtu=*/4096);
+      /*workReqId=*/7, oneSge(nullptr, 0), /*mtu=*/4096);
   postToTag(*tag, std::move(sendWqe), /*mtu=*/4096);
   enterTagError(*tag);
   // Destroyed before the sender ever visits: the accident this case is about.
@@ -795,8 +796,8 @@ TEST_F(TagSetTest, TheSendersVisitLeavesTheWorkOfATagThatHasNotFailed) {
   // One packet each, none on the wire, so failing a tag's work reports its
   // work request at the visit that finds it.
   for (uint8_t tagNum : {1, 2}) {
-    auto sendWqe =
-        std::make_unique<SendWqe>(kWorkReqId, buffer_->data(), kMtu, kMtu);
+    auto sendWqe = std::make_unique<SendWqe>(
+        kWorkReqId, oneSge(buffer_->data(), kMtu), kMtu);
     tagSet_->addUnsentPosns(sendWqe->getNumPosn());
     postToTag(*tagSet_->at(tagNum), std::move(sendWqe), kMtu);
   }
@@ -1011,7 +1012,8 @@ TEST_F(TagSetTest, AnErroredTagsReadIsAdmittedRatherThanHeld) {
       << "precondition: the queue accepts the second read";
   ASSERT_TRUE(tagSet_->postWqe(
       1,
-      std::make_unique<SendWqe>(kWorkReqId + 2, buffer_->data(), kMtu, kMtu)))
+      std::make_unique<SendWqe>(
+          kWorkReqId + 2, oneSge(buffer_->data(), kMtu), kMtu)))
       << "precondition: the queue accepts the send behind it";
   admissionExecutor_.drain();
 
@@ -1076,12 +1078,13 @@ TEST_F(TagSetTest, WorkThatSpendsNoSlotIsAdmittedWhileAReadHoldsTheDepth) {
 
   ASSERT_TRUE(tagSet_->postWqe(
       1,
-      std::make_unique<SendWqe>(kWorkReqId + 1, buffer_->data(), kMtu, kMtu)))
+      std::make_unique<SendWqe>(
+          kWorkReqId + 1, oneSge(buffer_->data(), kMtu), kMtu)))
       << "precondition: the queue accepts the send";
   ASSERT_TRUE(tagSet_->postWqe(
       1,
       std::make_unique<ReceiveWqe>(
-          kWorkReqId + 2, buffer_->data(), kMtu, kMtu)))
+          kWorkReqId + 2, oneSge(buffer_->data(), kMtu), kMtu)))
       << "precondition: the queue accepts the receive";
   admissionExecutor_.drain();
 
@@ -1130,7 +1133,7 @@ TEST_F(TagSetTest, AMarkedForDeletionTagHoldsNoOneBehindItsFullMsnSpan) {
   const uint32_t sendsHeldBehindTheRead = kMaxQpWorkRequests - 1;
   for (uint32_t i = 0; i < sendsHeldBehindTheRead; ++i) {
     auto sendWqe = std::make_unique<SendWqe>(
-        kWorkReqId + 1 + i, buffer_->data(), 1000, kMtu);
+        kWorkReqId + 1 + i, oneSge(buffer_->data(), 1000), kMtu);
     Wqe& send = *sendWqe;
     ASSERT_TRUE(postToTag(*stalled, std::move(sendWqe), kMtu))
         << "precondition: the send queue refused post " << i
@@ -1150,7 +1153,9 @@ TEST_F(TagSetTest, AMarkedForDeletionTagHoldsNoOneBehindItsFullMsnSpan) {
   ASSERT_TRUE(tagSet_->postWqe(
       1,
       std::make_unique<SendWqe>(
-          kWorkReqId + kMaxQpWorkRequests, buffer_->data(), kMtu, kMtu)))
+          kWorkReqId + kMaxQpWorkRequests,
+          oneSge(buffer_->data(), kMtu),
+          kMtu)))
       << "precondition: the queue accepts a post for the marked tag";
   // Drained with only this post queued, so the loop reaches the healthy tag's
   // post below only by getting past the marked tag's.
@@ -1159,7 +1164,9 @@ TEST_F(TagSetTest, AMarkedForDeletionTagHoldsNoOneBehindItsFullMsnSpan) {
   ASSERT_TRUE(tagSet_->postWqe(
       2,
       std::make_unique<SendWqe>(
-          kWorkReqId + kMaxQpWorkRequests + 1, buffer_->data(), kMtu, kMtu)))
+          kWorkReqId + kMaxQpWorkRequests + 1,
+          oneSge(buffer_->data(), kMtu),
+          kMtu)))
       << "precondition: the queue accepts a post for the healthy tag";
   admissionExecutor_.drain();
 
@@ -1212,7 +1219,7 @@ TEST_F(TagSetTest, NormalTransitionRacingErrorPublicationKeepsErr) {
     start.arrive_and_wait();
     for (size_t i = 0; i < tags.size(); ++i) {
       auto wqe = std::make_unique<SendWqe>(
-          kWorkReqId + i, buffer_->data(), kMtu, kMtu);
+          kWorkReqId + i, oneSge(buffer_->data(), kMtu), kMtu);
       wqe->setCompletionStatusOverride(kLocalLenErr);
       postToTag(*tags[i], std::move(wqe), kMtu);
     }

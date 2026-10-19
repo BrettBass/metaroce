@@ -31,6 +31,7 @@
 #include <libsoftmetaroce/test/LimitedTestSender.h>
 #include <libsoftmetaroce/test/MockCongestionController.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 #include <array>
 #include <chrono>
 #include <set>
@@ -134,7 +135,8 @@ class WatchdogTest : public Test {
     const uint32_t length = frames * qp_->getMtu();
     ASSERT_TRUE(qp_->postWqe(
         kMetaRoceInitialTag,
-        std::make_unique<SendWqe>(workReqId, payload, length, qp_->getMtu())));
+        std::make_unique<SendWqe>(
+            workReqId, oneSge(payload, length), qp_->getMtu())));
   }
 
   HighResTimer retxTimer_;
@@ -393,10 +395,7 @@ TEST_F(WatchdogTest, AReceivePostDoesNotStandInForTransmitProgress) {
   ASSERT_TRUE(qp_->postWqe(
       kMetaRoceInitialTag,
       std::make_unique<ReceiveWqe>(
-          /*workReqId=*/400,
-          receiveBuffer.data(),
-          receiveBuffer.size(),
-          qp_->getMtu())))
+          /*workReqId=*/400, oneSge(receiveBuffer), qp_->getMtu())))
       << "precondition: the receive has to be accepted, or neither post below "
          "could have recorded progress";
 
@@ -409,10 +408,7 @@ TEST_F(WatchdogTest, AReceivePostDoesNotStandInForTransmitProgress) {
   ASSERT_TRUE(qp_->postWqe(
       kMetaRoceInitialTag,
       std::make_unique<SendWqe>(
-          /*workReqId=*/401,
-          sendBuffer.data(),
-          sendBuffer.size(),
-          qp_->getMtu())))
+          /*workReqId=*/401, oneSge(sendBuffer), qp_->getMtu())))
       << "precondition: the send has to be accepted for its post to reach the "
          "deadline at all";
 

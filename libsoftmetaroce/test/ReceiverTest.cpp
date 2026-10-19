@@ -52,6 +52,7 @@
 #include <libsoftmetaroce/test/LimitedTestSender.h>
 #include <libsoftmetaroce/test/MockCongestionController.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 #include <libsoftmetaroce/test/PostToTag.h>
 #include <libsoftmetaroce/test/SourcePortRecorder.h>
 
@@ -533,13 +534,11 @@ class ReceiverTest : public ::testing::Test {
     auto readWqe = std::make_unique<ReadWriteWqe>(
         Wqe::WorkType::kRead,
         workReqId,
-        buffer,
-        size,
+        oneSge(buffer, size, lkey),
         qp->getMtu(),
         /*remoteAddress=*/0x1000,
         /*rkey=*/1,
-        /*send_flags=*/IBV_SEND_SIGNALED,
-        lkey);
+        /*send_flags=*/IBV_SEND_SIGNALED);
     postToTag(*tag, std::move(readWqe), qp->getMtu());
     return readMsn;
   }
@@ -563,7 +562,7 @@ class ReceiverTest : public ::testing::Test {
               ->lkey
         : 0;
     auto rwqe = std::make_unique<ReceiveWqe>(
-        workReqId, buffer, bufferSize, qp->getMtu(), lkey);
+        workReqId, oneSge(buffer, bufferSize, lkey), qp->getMtu());
     postToTag(*tag, std::move(rwqe), qp->getMtu());
   }
 
@@ -877,7 +876,7 @@ TEST_F(ReceiverTest, ValidationFailureLeavesTheTrackedSendWqeAlive) {
   // A send from this tag is already on the wire.
   std::array<char, 4096> payload{};
   auto sendWqe = std::make_unique<SendWqe>(
-      /*workReqId=*/7, payload.data(), payload.size(), qp->getMtu());
+      /*workReqId=*/7, oneSge(payload), qp->getMtu());
   Wqe* inFlightWqe = sendWqe.get();
   auto tag = qp->getTag(kMetaRoceInitialTag);
   postToTag(*tag, std::move(sendWqe), qp->getMtu());
@@ -945,7 +944,7 @@ TEST_F(ReceiverTest, AnRtoBeforeTheSendersVisitAbandonsTheErroredTagsFrame) {
   // A send from this tag is already on the wire.
   std::array<char, 4096> payload{};
   auto sendWqe = std::make_unique<SendWqe>(
-      /*workReqId=*/7, payload.data(), payload.size(), qp->getMtu());
+      /*workReqId=*/7, oneSge(payload), qp->getMtu());
   Wqe* inFlightWqe = sendWqe.get();
   auto tag = qp->getTag(kMetaRoceInitialTag);
   postToTag(*tag, std::move(sendWqe), qp->getMtu());
@@ -3067,7 +3066,7 @@ TEST_F(ReceiverTest, DiscardAReadRespMatchingASend) {
     auto* qp = lockedMap->at(dstQp).get();
     auto tag = qp->getTag(kMetaRoceInitialTag);
     auto sendWqe = std::make_unique<SendWqe>(
-        /*workReqId=*/99, sendBuffer.data(), kSendSize, qp->getMtu());
+        /*workReqId=*/99, oneSge(sendBuffer), qp->getMtu());
     Wqe* posted = sendWqe.get();
     postToTag(*tag, std::move(sendWqe), qp->getMtu());
     ASSERT_TRUE(posted->getMsn().has_value())
@@ -3135,18 +3134,20 @@ TEST_F(ReceiverTest, DiscardAReadRespMatchingAWrite) {
     auto writeWqe = std::make_unique<ReadWriteWqe>(
         Wqe::WorkType::kWrite,
         /*workReqId=*/77,
-        writeBuffer.data(),
-        kWriteSize,
+        oneSge(
+            writeBuffer,
+            // Registered for local write, so the permission check cannot be
+            // what saves the buffer here.
+            mrs.reg_mr(
+                   nullptr,
+                   writeBuffer.data(),
+                   kWriteSize,
+                   IBV_ACCESS_LOCAL_WRITE)
+                ->lkey),
         qp->getMtu(),
         /*remoteAddress=*/0x2000,
         /*rkey=*/1,
-        /*send_flags=*/IBV_SEND_SIGNALED,
-        // Registered for local write, so the permission check cannot be what
-        // saves the buffer here.
-        /*lkey=*/
-        mrs.reg_mr(
-               nullptr, writeBuffer.data(), kWriteSize, IBV_ACCESS_LOCAL_WRITE)
-            ->lkey);
+        /*send_flags=*/IBV_SEND_SIGNALED);
     Wqe* posted = writeWqe.get();
     postToTag(*tag, std::move(writeWqe), qp->getMtu());
     ASSERT_TRUE(posted->getMsn().has_value())
@@ -3197,7 +3198,7 @@ TEST_F(ReceiverTest, DiscardAnAtomicAckMatchingASend) {
     auto* qp = lockedMap->at(dstQp).get();
     auto tag = qp->getTag(kMetaRoceInitialTag);
     auto sendWqe = std::make_unique<SendWqe>(
-        /*workReqId=*/55, sendBuffer.data(), kSendSize, qp->getMtu());
+        /*workReqId=*/55, oneSge(sendBuffer), qp->getMtu());
     Wqe* posted = sendWqe.get();
     postToTag(*tag, std::move(sendWqe), qp->getMtu());
     ASSERT_TRUE(posted->getMsn().has_value())
@@ -3766,8 +3767,7 @@ TEST_F(ReceiverTest, MatchedReadRespWithOutOfRangePosnIsRejected) {
     auto readWqe = std::make_unique<ReadWriteWqe>(
         Wqe::WorkType::kRead,
         /*workReqId=*/88,
-        readBuffer,
-        kReadSize,
+        oneSge(readBuffer),
         qp->getMtu(),
         /*remoteAddress=*/0x1000,
         /*rkey=*/1);
@@ -3880,7 +3880,9 @@ TEST_F(ReceiverTest, HrnrCancelCarriesThePostedCsn) {
     postToTag(
         *tag,
         std::make_unique<ReceiveWqe>(
-            /*workReqId=*/42, nullptr, 0, qpRawPtr->getMtu(), /*lkey=*/0),
+            /*workReqId=*/42,
+            oneSge(nullptr, 0, /*lkey=*/0),
+            qpRawPtr->getMtu()),
         qpRawPtr->getMtu());
   }
 

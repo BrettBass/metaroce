@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <libsoftmetaroce/RejectedPosnSet.h>
 #include <libsoftmetaroce/Wqe.h>
+#include <libsoftmetaroce/test/OneSge.h>
 #include <array>
 #include <functional>
 #include <memory>
@@ -42,7 +43,7 @@ TEST_F(WqeTest, AbandonedPosnLeavesTheOutstandingCount) {
   constexpr uint32_t numPackets = 3;
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
-  SendWqe wqe(1, payload.data(), size, mtu);
+  SendWqe wqe(1, oneSge(payload), mtu);
   ASSERT_EQ(wqe.getOutstandingPosnCount(), numPackets)
       << "the abandon below is judged by the drop from this count, so a wrong "
          "starting count would blame abandonPosn for a sizing fault";
@@ -61,7 +62,7 @@ TEST_F(WqeTest, MessageIsCompleteWhenEveryPosnIsResolvedEitherWay) {
   constexpr uint32_t numPackets = 3;
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
-  SendWqe wqe(1, payload.data(), size, mtu);
+  SendWqe wqe(1, oneSge(payload), mtu);
 
   ASSERT_EQ(wqe.allocateNextPosn(), 0u)
       << "precondition: the posn acked below is the one this side put on the wire";
@@ -86,7 +87,7 @@ TEST_F(WqeTest, MarkFailingFreezesSendingAndAbandonsUnsentPosns) {
   constexpr uint32_t size = numPackets * mtu;
   constexpr uint32_t numInFlight = 2;
   std::array<char, size> payload{};
-  SendWqe wqe(1, payload.data(), size, mtu);
+  SendWqe wqe(1, oneSge(payload), mtu);
   for (uint32_t i = 0; i < numInFlight; i++) {
     std::ignore = wqe.allocateNextPosn();
   }
@@ -124,7 +125,7 @@ TEST_F(WqeTest, FailingWqeSettlesWhenItsInFlightPacketsAreAcked) {
   constexpr uint32_t numPackets = 3;
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
-  SendWqe wqe(1, payload.data(), size, mtu);
+  SendWqe wqe(1, oneSge(payload), mtu);
   const uint32_t firstInFlight = wqe.allocateNextPosn();
   const uint32_t secondInFlight = wqe.allocateNextPosn();
 
@@ -148,7 +149,7 @@ TEST_F(WqeTest, MarkFailingAgainKeepsTheFirstStatus) {
   constexpr uint32_t numPackets = 2;
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
-  SendWqe wqe(1, payload.data(), size, mtu);
+  SendWqe wqe(1, oneSge(payload), mtu);
 
   wqe.markFailing(kWcRetryExcErr);
   const uint32_t abandoned = wqe.markFailing(kWrFlushErr);
@@ -171,7 +172,7 @@ TEST_F(WqeTest, MarkFailingKeepsAStatusRecordedBeforeIt) {
   constexpr uint32_t numPackets = 2;
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
-  SendWqe wqe(1, payload.data(), size, mtu);
+  SendWqe wqe(1, oneSge(payload), mtu);
 
   wqe.setCompletionStatusOverride(kLocalLenErr);
   ASSERT_FALSE(wqe.isFailing())
@@ -209,14 +210,13 @@ const std::array<InlineCapableWqe, 4> kInlineCapableWqes{
     {{"send",
       [](void* address, uint32_t size, int sendFlags) -> std::unique_ptr<Wqe> {
         return std::make_unique<SendWqe>(
-            kInlineWorkReqId, address, size, kInlineMtu, sendFlags);
+            kInlineWorkReqId, oneSge(address, size), kInlineMtu, sendFlags);
       }},
      {"send with immediate",
       [](void* address, uint32_t size, int sendFlags) -> std::unique_ptr<Wqe> {
         return std::make_unique<SendWithImmWqe>(
             kInlineWorkReqId,
-            address,
-            size,
+            oneSge(address, size),
             kInlineMtu,
             kInlineImmediateData,
             sendFlags);
@@ -226,8 +226,7 @@ const std::array<InlineCapableWqe, 4> kInlineCapableWqes{
         return std::make_unique<ReadWriteWqe>(
             Wqe::WorkType::kWrite,
             kInlineWorkReqId,
-            address,
-            size,
+            oneSge(address, size),
             kInlineMtu,
             kInlineRemoteAddress,
             kInlineRkey,
@@ -237,8 +236,7 @@ const std::array<InlineCapableWqe, 4> kInlineCapableWqes{
       [](void* address, uint32_t size, int sendFlags) -> std::unique_ptr<Wqe> {
         return std::make_unique<WriteWithImmWqe>(
             kInlineWorkReqId,
-            address,
-            size,
+            oneSge(address, size),
             kInlineMtu,
             kInlineRemoteAddress,
             kInlineRkey,
@@ -298,7 +296,7 @@ TEST_F(WqeTest, AFinalPacketAliasedByTheSumIsRefusedUnderAuditing) {
   constexpr uint32_t size = numPackets * mtu;
   constexpr uint32_t lastPosn = 2;
   std::vector<char> payload(size);
-  ReceiveWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+  ReceiveWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
 
   wqe.onPosnReceived(0);
   wqe.onPosnReceived(3);
@@ -350,7 +348,7 @@ TEST_F(WqeTest, RejectedPosnsAreOfferedLowestFirst) {
   constexpr uint32_t numPackets = 6;
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
-  SendWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+  SendWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
 
   for (uint32_t expected = 0; expected < numPackets; ++expected) {
     ASSERT_EQ(wqe.allocateNextPosn(), expected)
@@ -379,8 +377,7 @@ TEST_F(WqeTest, TestClaimSndNxtPosn) {
   std::array<char, size> payload{};
   SendWqe wqe(
       1, // workReqId
-      payload.data(), // address
-      size,
+      oneSge(payload),
       mtu);
 
   // Test initial state
@@ -446,8 +443,7 @@ TEST_F(WqeTest, AReadIsServedByItsFirstResponse) {
   constexpr uint16_t mtu = 4096;
   constexpr uint32_t numResponses = 3;
   std::array<char, numResponses * mtu> payload{};
-  ReadWriteWqe read(
-      Wqe::WorkType::kRead, 1, payload.data(), payload.size(), mtu, 0x1000, 42);
+  ReadWriteWqe read(Wqe::WorkType::kRead, 1, oneSge(payload), mtu, 0x1000, 42);
 
   EXPECT_FALSE(read.hasBeenServed())
       << "nothing has come back yet, so the request still has something to "
@@ -467,7 +463,7 @@ TEST_F(WqeTest, TestSingleMtuMessage) {
   constexpr uint16_t mtu = 4096;
   constexpr uint32_t size = mtu; // Exactly one MTU
   std::array<char, size> payload{};
-  SendWqe wqe(1, payload.data(), size, mtu);
+  SendWqe wqe(1, oneSge(payload), mtu);
 
   // Verify we have exactly one position
   EXPECT_EQ(wqe.getOutstandingPosnCount(), 1)
@@ -488,7 +484,7 @@ TEST_F(WqeTest, TestZeroLengthMessageHasSinglePosn) {
   // Spec 8.2.3 permits zero-byte payloads for SEND, SEND_IMM_P, WRITE_IMM_P,
   // READ_RESP. The WQE must allocate exactly one POSN (one data packet with
   // empty payload) without underflowing the numPosn formula.
-  SendWqe wqe(1, /* address */ nullptr, /* size */ 0, mtu);
+  SendWqe wqe(1, oneSge(/* address */ nullptr, /* size */ 0), mtu);
 
   EXPECT_EQ(wqe.getOutstandingPosnCount(), 1u)
       << "Zero-length message should have exactly one POSN, not underflow";
@@ -508,7 +504,7 @@ TEST_F(WqeTest, TestSubMtuMessage) {
   constexpr uint16_t mtu = 4096;
   constexpr uint32_t size = mtu / 4; // Smaller than one MTU
   std::array<char, size> payload{};
-  SendWqe wqe(1, payload.data(), size, mtu);
+  SendWqe wqe(1, oneSge(payload), mtu);
 
   // Verify we have exactly one position
   EXPECT_EQ(wqe.getOutstandingPosnCount(), 1)
@@ -528,7 +524,7 @@ TEST_F(WqeTest, TestExactMultipleMtu) {
   constexpr uint32_t size =
       numPackets * mtu; // Exactly multiple MTUs (no partial packet)
   std::array<char, size> payload{};
-  SendWqe wqe(1, payload.data(), size, mtu);
+  SendWqe wqe(1, oneSge(payload), mtu);
 
   EXPECT_EQ(wqe.getOutstandingPosnCount(), numPackets)
       << "Should have exactly numPackets positions";
@@ -552,7 +548,7 @@ TEST_F(WqeTest, TestMtuUpdate) {
   constexpr uint16_t initialMtu = 4096;
   constexpr uint32_t size = 3 * initialMtu + initialMtu / 2; // 3.5 MTUs
   std::array<char, size> payload{};
-  SendWqe wqe(1, payload.data(), size, initialMtu);
+  SendWqe wqe(1, oneSge(payload), initialMtu);
 
   EXPECT_EQ(wqe.getOutstandingPosnCount(), 4)
       << "Should have 4 positions with initial MTU";
@@ -587,7 +583,7 @@ TEST_F(WqeTest, TestWqeOutputStreamWithImmediateData) {
       0x12345678; // Test value in network byte order
   std::array<char, size> payload{};
 
-  SendWithImmWqe wqe(1, payload.data(), size, mtu, immediateData);
+  SendWithImmWqe wqe(1, oneSge(payload), mtu, immediateData);
 
   // Convert WQE to string using operator<<
   std::ostringstream oss;
@@ -614,7 +610,7 @@ TEST_F(WqeTest, TestOversizeWqeThrowsOnAllocate) {
   constexpr uint32_t size = 512 << 20; // 512 MB, which is too big.
   std::array<char, 4096> payload{}; // undersize payload, no need to allocate.
 
-  SendWqe wqe(1, payload.data(), size, mtu);
+  SendWqe wqe(1, oneSge(payload.data(), size), mtu);
 
   EXPECT_EQ(wqe.getOutstandingPosnCount(), 2 << 16)
       << "Should require 128K (4096-byte) packets to send 512MB";
@@ -628,7 +624,12 @@ TEST_F(WqeTest, AnOversizeReadIsRejectedLikeAnOversizeSend) {
   std::array<char, 4096> payload{}; // undersize payload, no need to allocate.
 
   ReadWriteWqe wqe(
-      Wqe::WorkType::kRead, 1, payload.data(), size, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kRead,
+      1,
+      oneSge(payload.data(), size),
+      mtu,
+      0xDEAD0000,
+      42);
 
   EXPECT_EQ(wqe.getOutstandingPosnCount(), 2 << 16)
       << "a 512MB read is answered in 128K (4096-byte) response packets";
@@ -648,14 +649,14 @@ TEST_F(WqeTest, AtomicFetchAddWqeCreation) {
   AtomicWqe wqe(
       Wqe::WorkType::kAtomicFetchAdd,
       1, // workReqId
-      &localBuffer,
+      LocalSge{
+          .address = &localBuffer, .length = sizeof(localBuffer), .lkey = 1},
       mtu,
       remoteAddr,
       rkey,
       addData,
       0 /* compareData unused for FA */,
-      /*send_flags=*/0,
-      /*lkey=*/1);
+      /*send_flags=*/0);
 
   EXPECT_EQ(wqe.getWorkType(), Wqe::WorkType::kAtomicFetchAdd);
   EXPECT_EQ(wqe.getRemoteAddress(), remoteAddr);
@@ -677,14 +678,14 @@ TEST_F(WqeTest, AtomicCmpSwpWqeCreation) {
   AtomicWqe wqe(
       Wqe::WorkType::kAtomicCmpSwp,
       2, // workReqId
-      &localBuffer,
+      LocalSge{
+          .address = &localBuffer, .length = sizeof(localBuffer), .lkey = 1},
       mtu,
       remoteAddr,
       rkey,
       swapData,
       compareData,
-      /*send_flags=*/0,
-      /*lkey=*/1);
+      /*send_flags=*/0);
 
   EXPECT_EQ(wqe.getWorkType(), Wqe::WorkType::kAtomicCmpSwp);
   EXPECT_EQ(wqe.getRemoteAddress(), remoteAddr);
@@ -702,14 +703,14 @@ TEST_F(WqeTest, AtomicWqeAlwaysSinglePosn) {
   AtomicWqe wqe(
       Wqe::WorkType::kAtomicFetchAdd,
       1,
-      &localBuffer,
+      LocalSge{
+          .address = &localBuffer, .length = sizeof(localBuffer), .lkey = 1},
       mtu,
       0x1000, // remoteAddr
       1, // rkey
       0x42, // swapOrAddData
       0 /* compareData */,
-      /*send_flags=*/0,
-      /*lkey=*/1);
+      /*send_flags=*/0);
 
   EXPECT_EQ(wqe.getNumPosn(), 1u)
       << "Atomic ops (8 bytes) always fit in a single packet";
@@ -722,14 +723,16 @@ TEST_F(WqeTest, AtomicWqeInvalidWorkType) {
       AtomicWqe(
           Wqe::WorkType::kSend,
           1,
-          &localBuffer,
+          LocalSge{
+              .address = &localBuffer,
+              .length = sizeof(localBuffer),
+              .lkey = 0},
           4096,
           0x1000,
           1,
           0,
           0,
-          /*send_flags=*/0,
-          /*lkey=*/0),
+          /*send_flags=*/0),
       std::runtime_error);
 }
 
@@ -743,8 +746,7 @@ TEST_F(WqeTest, ReadWqeReportsCorrectPayloadSize) {
   ReadWriteWqe wqe(
       Wqe::WorkType::kRead,
       1, // workReqId
-      payload.data(),
-      size,
+      oneSge(payload),
       mtu,
       0xDEAD0000, // remoteAddress
       42); // rkey
@@ -762,7 +764,7 @@ TEST_F(WqeTest, ReadWqeMultiPosnReportsCorrectPayloadSize) {
   constexpr uint32_t size = numPackets * mtu - mtu / 2; // 10240 bytes
   std::array<char, size> payload{};
   ReadWriteWqe wqe(
-      Wqe::WorkType::kRead, 1, payload.data(), size, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kRead, 1, oneSge(payload), mtu, 0xDEAD0000, 42);
 
   EXPECT_EQ(wqe.getOutstandingPosnCount(), numPackets)
       << "Multi-MTU read should have " << numPackets << " positions";
@@ -785,8 +787,7 @@ TEST_F(WqeTest, ReadWithImmWqeCarriesImmediateAndActsLikeARead) {
   std::array<char, size> payload{};
   ReadWithImmWqe wqe(
       1, // workReqId
-      payload.data(),
-      size,
+      oneSge(payload),
       mtu,
       0xDEAD0000, // remoteAddress
       42, // rkey
@@ -818,7 +819,7 @@ TEST_F(WqeTest, SendingAReadRequestLeavesTheResponsePositionsAlone) {
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
   ReadWriteWqe wqe(
-      Wqe::WorkType::kRead, 1, payload.data(), size, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kRead, 1, oneSge(payload), mtu, 0xDEAD0000, 42);
 
   EXPECT_EQ(wqe.allocateNextPosn(), Wqe::kRequestFrameWirePosn)
       << "A read allocates the one frame it sends, which carries position "
@@ -841,7 +842,7 @@ TEST_F(WqeTest, AckingAReadRequestDoesNotCompleteTheRead) {
   constexpr uint16_t mtu = 4096;
   std::array<char, mtu> payload{};
   ReadWriteWqe wqe(
-      Wqe::WorkType::kRead, 1, payload.data(), mtu, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kRead, 1, oneSge(payload), mtu, 0xDEAD0000, 42);
   const uint32_t posn = wqe.allocateNextPosn();
 
   wqe.onFrameNewlyAcked(posn);
@@ -857,7 +858,7 @@ TEST_F(WqeTest, AReleasedReadRequestFrameMayBeSentAgain) {
   constexpr uint16_t mtu = 4096;
   std::array<char, mtu> payload{};
   ReadWriteWqe wqe(
-      Wqe::WorkType::kRead, 1, payload.data(), mtu, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kRead, 1, oneSge(payload), mtu, 0xDEAD0000, 42);
   const uint32_t posn = wqe.allocateNextPosn();
   ASSERT_TRUE(wqe.isFrameAllocated(posn))
       << "A sent request frame is allocated until it is acked or released";
@@ -880,7 +881,7 @@ TEST_F(WqeTest, AReadMarkedFailingBeforeItsRequestWentOutIsNotOffered) {
   constexpr uint16_t mtu = 4096;
   std::array<char, mtu> payload{};
   ReadWriteWqe wqe(
-      Wqe::WorkType::kRead, 1, payload.data(), mtu, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kRead, 1, oneSge(payload), mtu, 0xDEAD0000, 42);
   ASSERT_FALSE(wqe.hasBeenSent())
       << "the request has not gone out yet, so the sender still has it to "
          "send";
@@ -896,7 +897,7 @@ TEST_F(WqeTest, AnAckForAReadRequestABrnrTookBackDoesNotStandInForTheResend) {
   constexpr uint16_t mtu = 4096;
   std::array<char, mtu> payload{};
   ReadWriteWqe wqe(
-      Wqe::WorkType::kRead, 1, payload.data(), mtu, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kRead, 1, oneSge(payload), mtu, 0xDEAD0000, 42);
   const uint32_t posn = wqe.allocateNextPosn();
   wqe.releaseFrame(posn);
 
@@ -913,7 +914,7 @@ TEST_F(WqeTest, FailingAReadReturnsOneUnsentFrameNotOnePerResponsePosn) {
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
   ReadWriteWqe unsent(
-      Wqe::WorkType::kRead, 1, payload.data(), size, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kRead, 1, oneSge(payload), mtu, 0xDEAD0000, 42);
 
   EXPECT_EQ(unsent.markFailing(kWcRetryExcErr), 1u)
       << "the sender was told this message had one frame to send, so "
@@ -922,7 +923,7 @@ TEST_F(WqeTest, FailingAReadReturnsOneUnsentFrameNotOnePerResponsePosn) {
          "send would inflate the unsent total for work that never existed";
 
   ReadWriteWqe sent(
-      Wqe::WorkType::kRead, 2, payload.data(), size, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kRead, 2, oneSge(payload), mtu, 0xDEAD0000, 42);
   std::ignore = sent.allocateNextPosn();
   EXPECT_EQ(sent.markFailing(kWcRetryExcErr), 0u)
       << "a request already on the wire left the unsent count when it was "
@@ -941,7 +942,7 @@ TEST_F(WqeTest, TheUnresolvedTxCountIsAReadsRequestAndASendsPosns) {
   std::array<char, size> payload{};
 
   ReadWriteWqe read(
-      Wqe::WorkType::kRead, 1, payload.data(), size, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kRead, 1, oneSge(payload), mtu, 0xDEAD0000, 42);
   const uint32_t requestPosn = read.allocateNextPosn();
   EXPECT_EQ(read.getUnresolvedTxCount(), 1u)
       << "a read on the wire waits on the one frame it sent, not on the four "
@@ -955,7 +956,7 @@ TEST_F(WqeTest, TheUnresolvedTxCountIsAReadsRequestAndASendsPosns) {
       << "the response posns are the responder's to fill and are untouched, "
          "which is what makes the two counts differ for a read";
 
-  SendWqe send(2, payload.data(), size, mtu);
+  SendWqe send(2, oneSge(payload), mtu);
   EXPECT_EQ(send.getUnresolvedTxCount(), numPackets)
       << "a send waits on every posn, sent or not: each one is a packet this "
          "side has yet to send, or has sent and not yet had answered";
@@ -975,14 +976,14 @@ TEST_F(WqeTest, AFailingAtomicSettlesOnceItsRequestFrameDoes) {
   AtomicWqe wqe(
       Wqe::WorkType::kAtomicFetchAdd,
       1, // workReqId
-      &localBuffer,
+      LocalSge{
+          .address = &localBuffer, .length = sizeof(localBuffer), .lkey = 1},
       Wqe::kAtomicMtu,
       0x1000, // remoteAddress
       1, // rkey
       0x42, // swapOrAddData
       0, // compareData unused for fetch-add
-      /*send_flags=*/0,
-      /*lkey=*/1);
+      /*send_flags=*/0);
   const uint32_t posn = wqe.allocateNextPosn();
 
   wqe.markFailing(kWcRetryExcErr);
@@ -1005,7 +1006,7 @@ TEST_F(WqeTest, AbandoningAReadRequestFrameLeavesItsResponsePositionAlone) {
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
   ReadWriteWqe wqe(
-      Wqe::WorkType::kRead, 1, payload.data(), size, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kRead, 1, oneSge(payload), mtu, 0xDEAD0000, 42);
   const uint32_t posn = wqe.allocateNextPosn();
 
   wqe.abandonFrame(posn);
@@ -1027,7 +1028,7 @@ TEST_F(WqeTest, AWriteIsCompletedByAcksForEveryPositionItSent) {
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
   ReadWriteWqe wqe(
-      Wqe::WorkType::kWrite, 1, payload.data(), size, mtu, 0xDEAD0000, 42);
+      Wqe::WorkType::kWrite, 1, oneSge(payload), mtu, 0xDEAD0000, 42);
 
   for (uint32_t i = 0; i < numPackets; i++) {
     const uint32_t posn = wqe.allocateNextPosn();
@@ -1043,7 +1044,7 @@ TEST_F(WqeTest, FailingAReceiveTwiceLeavesItsOutstandingCountAlone) {
   constexpr uint32_t numPackets = 4;
   constexpr uint32_t size = numPackets * mtu;
   std::vector<char> payload(size);
-  ReceiveWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+  ReceiveWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
 
   wqe.onPosnReceived(0);
   ASSERT_EQ(wqe.markFailing(kWrFlushErr), numPackets - 1)
@@ -1067,7 +1068,7 @@ TEST_F(WqeTest, AFinalPacketBehindAPosnThatArrivedOutOfOrderIsRefused) {
   constexpr uint32_t numPackets = 10;
   constexpr uint32_t size = numPackets * mtu;
   std::vector<char> payload(size);
-  ReceiveWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+  ReceiveWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
 
   wqe.onPosnReceived(7);
   const uint32_t outstandingBefore = wqe.getOutstandingPosnCount();
@@ -1087,7 +1088,7 @@ TEST_F(WqeTest, AFinalPacketBehindWhatAlreadyArrivedIsRefused) {
   constexpr uint32_t arrived = 5;
   constexpr uint32_t size = numPackets * mtu;
   std::vector<char> payload(size);
-  ReceiveWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+  ReceiveWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
 
   for (uint32_t posn = 0; posn < arrived; ++posn) {
     wqe.onPosnReceived(posn);
@@ -1117,13 +1118,13 @@ TEST_F(WqeTest, ReceiveWqeImmediateCompletionOpcodeDistinguishesSendVsWrite) {
   constexpr uint16_t mtu = 4096;
   std::array<char, 64> payload{};
 
-  ReceiveWqe sendImm(1 /*workReqId*/, payload.data(), payload.size(), mtu);
+  ReceiveWqe sendImm(1 /*workReqId*/, oneSge(payload), mtu);
   sendImm.setImmediateData(0xABCD);
   EXPECT_EQ(sendImm.ibvCompletionOpcode(), IBV_WC_RECV)
       << "a receive consumed by send-with-immediate completes IBV_WC_RECV even "
          "though it carries immediate data";
 
-  ReceiveWqe writeImm(2 /*workReqId*/, payload.data(), payload.size(), mtu);
+  ReceiveWqe writeImm(2 /*workReqId*/, oneSge(payload), mtu);
   writeImm.setImmediateData(0xABCD);
   writeImm.setIbvCompletionOpcode(IBV_WC_RECV_RDMA_WITH_IMM);
   EXPECT_EQ(writeImm.ibvCompletionOpcode(), IBV_WC_RECV_RDMA_WITH_IMM)
@@ -1340,7 +1341,7 @@ void runPosnEventSweep() {
 
   // A Wqe cannot be copied, so each sequence runs against a fresh one.
   const auto replay = [&](const std::vector<PosnOp>& ops) {
-    SendWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+    SendWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
     PosnModel model;
     for (size_t i = 0; i < ops.size() && firstFailure.empty(); ++i) {
       uint32_t got = 0;
@@ -1442,7 +1443,7 @@ TEST_F(WqeTest, TheAuditorCatchesAPosnHandedBackAfterItWasAcked) {
   constexpr uint32_t numPackets = 3;
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
-  SendWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+  SendWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
 
   ASSERT_EQ(wqe.allocateNextPosn(), 0u)
       << "precondition: posn 0 goes out, so the ack below names a frame that "
@@ -1463,7 +1464,7 @@ TEST_F(WqeTest, APosnHandedBackThatNeverWentOutStopsTheProcess) {
   constexpr uint32_t numPackets = 3;
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
-  SendWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+  SendWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
 
   // Two guards stop this, and which one speaks depends on the build: the
   // work request's DCHECK where those are kept, the set's CHECK otherwise.
@@ -1485,7 +1486,7 @@ TEST_F(WqeTest, APosnHandedBackTwiceStopsTheProcess) {
   constexpr uint32_t numPackets = 3;
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
-  SendWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+  SendWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
 
   ASSERT_EQ(wqe.allocateNextPosn(), 0u)
       << "precondition: the posn handed back below is one that went out, "
@@ -1508,7 +1509,7 @@ TEST_F(WqeTest, APosnArrivingTwiceLeavesTheAuditorAbleToFailTheMessage) {
   constexpr uint32_t numPackets = 3;
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
-  ReceiveWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+  ReceiveWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
 
   wqe.onPosnReceived(0);
   wqe.onPosnReceived(0);
@@ -1529,7 +1530,8 @@ TEST_F(WqeTest, AnMtuUpdateAfterAnArrivalStopsTheProcess) {
   constexpr uint32_t startingPackets = 4;
   constexpr uint32_t grownPackets = 7;
   std::vector<char> payload(grownPackets * mtu);
-  ReceiveWqe wqe(1 /*workReqId*/, payload.data(), startingPackets * mtu, mtu);
+  ReceiveWqe wqe(
+      1 /*workReqId*/, oneSge(payload.data(), startingPackets * mtu), mtu);
 
   wqe.onPosnReceived(0);
 
@@ -1546,7 +1548,7 @@ TEST_F(WqeTest, AnMtuUpdateAfterAPosnWentOutStopsTheProcess) {
   constexpr uint16_t mtu = 4096;
   constexpr uint32_t size = 4 * mtu;
   std::array<char, size> payload{};
-  SendWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+  SendWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
 
   (void)wqe.allocateNextPosn();
 
@@ -1564,7 +1566,7 @@ TEST_F(WqeTest, AReceiveShortenedToItsLastPacketKeepsTheAuditorInStep) {
   constexpr uint32_t numPackets = 4;
   constexpr uint32_t size = numPackets * mtu;
   std::array<char, size> payload{};
-  ReceiveWqe wqe(1 /*workReqId*/, payload.data(), size, mtu);
+  ReceiveWqe wqe(1 /*workReqId*/, oneSge(payload), mtu);
 
   wqe.onPosnReceived(0);
   ASSERT_TRUE(wqe.setFinalPacket(1, mtu, mtu))
@@ -1587,7 +1589,7 @@ TEST_F(WqeTest, AReceiveShortenedToItsLastPacketKeepsTheAuditorInStep) {
 TEST_F(WqeTest, AContiguousSendPayloadIsReferencedInPlaceAtItsOffset) {
   constexpr uint16_t mtu = 256;
   std::vector<uint8_t> buffer(600);
-  SendWqe wqe(1, buffer.data(), static_cast<uint32_t>(buffer.size()), mtu);
+  SendWqe wqe(1, oneSge(buffer), mtu);
   const folly::IOBuf payload = wqe.makeSendPayloadView(2, mtu, 88);
   EXPECT_EQ(payload.data(), buffer.data() + 2 * mtu)
       << "the send reads the caller's buffer at the posn's offset, uncopied";
@@ -1600,7 +1602,7 @@ TEST_F(WqeTest, AContiguousSendPayloadIsReferencedInPlaceAtItsOffset) {
 TEST_F(WqeTest, AContiguousReceiveTakesBytesAtThePosnsOffset) {
   constexpr uint16_t mtu = 256;
   std::vector<uint8_t> buffer(600, 0);
-  ReceiveWqe wqe(1, buffer.data(), static_cast<uint32_t>(buffer.size()), mtu);
+  ReceiveWqe wqe(1, oneSge(buffer), mtu);
   const std::vector<uint8_t> bytes(88, 0xAB);
   wqe.deliverPosn(2, mtu, folly::ByteRange(bytes.data(), bytes.size()));
   EXPECT_EQ(std::count(buffer.begin(), buffer.begin() + 2 * mtu, 0), 2 * mtu)
@@ -1612,7 +1614,7 @@ TEST_F(WqeTest, AContiguousReceiveTakesBytesAtThePosnsOffset) {
 TEST_F(WqeTest, AReceiveRefusesBytesPastThePosn) {
   constexpr uint16_t mtu = 256;
   std::vector<uint8_t> buffer(512);
-  ReceiveWqe wqe(1, buffer.data(), static_cast<uint32_t>(buffer.size()), mtu);
+  ReceiveWqe wqe(1, oneSge(buffer), mtu);
   const std::vector<uint8_t> oversize(mtu + 1);
   EXPECT_DEATH(
       wqe.deliverPosn(0, mtu, folly::ByteRange(oversize)),

@@ -40,6 +40,7 @@
 #include <libsoftmetaroce/congestion_control/CongestionController.h>
 #include <libsoftmetaroce/test/LimitedTestSender.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 
 #include <atomic>
 #include <thread>
@@ -118,7 +119,7 @@ struct PostBenchFixture {
   }
 
   std::unique_ptr<Wqe> makeSend(uint64_t id) {
-    return std::make_unique<SendWqe>(id, payload.data(), kMtu, kMtu);
+    return std::make_unique<SendWqe>(id, oneSge(payload), kMtu);
   }
 };
 

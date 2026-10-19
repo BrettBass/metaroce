@@ -46,6 +46,7 @@
 #include <libsoftmetaroce/congestion_control/CongestionController.h>
 #include <libsoftmetaroce/test/LimitedTestSender.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 
 #include <vector>
 
@@ -155,8 +156,7 @@ struct AckBenchFixture {
                          "dominate what this measures";
     const bool posted = qp->postWqe(
         kMetaRoceInitialTag,
-        std::make_unique<SendWqe>(
-            0, payload.data(), static_cast<size_t>(window) * kMtu, kMtu));
+        std::make_unique<SendWqe>(0, oneSge(payload), kMtu));
     CHECK(posted) << "the window this measures is the work of this one post";
     // Process the posted WQE into its Tag so findNextWqe (and thus
     // getNextPacketToSend) can produce its packets.

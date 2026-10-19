@@ -1851,8 +1851,7 @@ TEST_F(VerbsTest, PostZeroLengthSendIsAccepted) {
 /*
  * Tests that ibv_post_send accepts a zero-length IBV_WR_SEND posted with
  * num_sge=0 (no SGE list). This is the other valid spelling of a zero-byte
- * SEND and exercises the null-source-address path through
- * addressAndLengthFromSge.
+ * SEND, posted with a null buffer address.
  */
 TEST_F(VerbsTest, PostZeroLengthSendWithNoSgeIsAccepted) {
   struct ibv_qp* ibvqp = fixtureQp();

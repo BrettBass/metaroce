@@ -18,6 +18,7 @@
 #include <libsoftmetaroce/modifier/Modifier.h>
 #include <libsoftmetaroce/test/LimitedTestSender.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
+#include <libsoftmetaroce/test/OneSge.h>
 #include <libsoftmetaroce/test/QpTestBase.h>
 #include <tuple>
 
@@ -322,8 +323,8 @@ TEST_F(QpWithTagsTest, ErrorConditionsMultiTag) {
   EXPECT_EQ(qp.getTag(99), nullptr);
 
   // Test posting WQE with non-existent tag
-  auto invalidWqe =
-      std::make_unique<SendWqe>(1, receiveBuffer.data(), 1000, qp.getMtu());
+  auto invalidWqe = std::make_unique<SendWqe>(
+      1, oneSge(receiveBuffer.data(), 1000), qp.getMtu());
   EXPECT_THROW(
       std::ignore = qp.postWqe(99, std::move(invalidWqe)), std::out_of_range);
 }

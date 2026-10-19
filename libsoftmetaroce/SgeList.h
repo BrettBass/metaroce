@@ -44,6 +44,8 @@ struct LocalSge {
 
 using LocalSges = folly::small_vector<LocalSge, kMaxSgesPerWorkRequest>;
 
+[[nodiscard]] uint32_t totalSgeLength(std::span<const LocalSge> sges);
+
 // nullopt for a malformed list: a count past the device limit, a missing list,
 // or a total length a message cannot hold.
 [[nodiscard]] std::optional<ValidatedSgeList> validatedSgeList(
