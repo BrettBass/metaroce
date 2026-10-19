@@ -69,7 +69,10 @@ class RxFlow : public Flow {
       // Copy base intentionally: moving it would trigger use-after-move on
       // the subclass members accessed below.
       // NOLINTNEXTLINE(performance-move-constructor-init)
-      : Flow(other), rxState_(std::move(other.rxState_)) {
+      : Flow(other),
+        rxState_(std::move(other.rxState_)),
+        lastIngressSourcePort_(other.lastIngressSourcePort_),
+        ingressSourcePortChanged_(other.ingressSourcePortChanged_.load()) {
     uint32_t seq = other.ackSeq_.exchange(0, std::memory_order_acq_rel);
     if (seq > 0 && (seq & 1) == 0) {
       pendingAck_ = std::move(other.pendingAck_);
@@ -97,7 +100,8 @@ class RxFlow : public Flow {
     return rxState_;
   }
 
-  void setPendingAck(AckHeader ackHeader);
+  // Publishes an ACK, noting the UDP source port of the packet it acknowledges.
+  void setPendingAck(AckHeader ackHeader, uint16_t ingressSourcePort);
 
   std::unique_ptr<struct EgressPacket> getNextAckToSend();
 
@@ -145,6 +149,10 @@ class RxFlow : public Flow {
   // assignment + one atomic store).
   AckHeader pendingAck_;
   std::atomic<uint32_t> ackSeq_{0};
+  // Only the receiver thread reads or writes lastIngressSourcePort_. The sender
+  // thread clears ingressSourcePortChanged_ when it moves the ACK socket.
+  std::optional<uint16_t> lastIngressSourcePort_;
+  std::atomic<bool> ingressSourcePortChanged_{false};
 };
 
 } // namespace libsoftmetaroce

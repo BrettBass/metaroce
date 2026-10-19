@@ -78,6 +78,7 @@ class Flow {
   const uint16_t flowId_;
 
   // Runtime routing state; socketId_/portPairIdx_ change on repath/failover,
+  // and socketId_ also on an ingress UDP source-port change (sender thread),
   // each with its const construction-time original preserved for reset.
   uint16_t socketId_;
   const uint16_t originalSocketId_;

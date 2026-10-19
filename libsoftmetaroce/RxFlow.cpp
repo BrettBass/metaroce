@@ -42,7 +42,12 @@ static BitVector<AckHeader::kAckTrackerBits> buildBitVectorForState(
 // Single-writer: called only from the Receiver's onDataAvailable (one
 // EventBase thread per RxFlow). Concurrent writers would mix fields
 // from different ACKs in pendingAck_.
-void RxFlow::setPendingAck(AckHeader ackHeader) {
+void RxFlow::setPendingAck(AckHeader ackHeader, uint16_t ingressSourcePort) {
+  if (lastIngressSourcePort_.has_value() &&
+      ingressSourcePort != *lastIngressSourcePort_) {
+    ingressSourcePortChanged_.store(true, std::memory_order_release);
+  }
+  lastIngressSourcePort_ = ingressSourcePort;
   uint32_t seq = ackSeq_.load(std::memory_order_acquire);
   CHECK_EQ(seq & 1, 0)
       << "concurrent setPendingAck: seqlock expects a single writer. "
@@ -101,6 +106,12 @@ std::unique_ptr<struct EgressPacket> RxFlow::getNextAckToSend() {
     // so the arbiter retries after the writer finishes.
     qp_.signalReadyAsync();
     return nullptr;
+  }
+
+  // Every source-port change since the last drain moves the ACK socket once;
+  // ack-source-port.md says why the ACK does not copy the source port instead.
+  if (ingressSourcePortChanged_.exchange(false, std::memory_order_acq_rel)) {
+    socketId_ = qp_.getSender().getAlternateAckSocket(socketId_);
   }
 
   using OperationType = BaseHeader::Opcode::OperationType;

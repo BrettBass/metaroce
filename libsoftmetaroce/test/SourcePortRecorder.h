@@ -23,6 +23,7 @@
 #include <libsoftmetaroce/test/MockUDPSocket.h>
 #include <cerrno>
 #include <functional>
+#include <map>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -33,6 +34,9 @@ namespace libsoftmetaroce {
 // already in use each port `inUse` names.
 struct SourcePortRecorder {
   std::vector<uint16_t> bound;
+  // The UDP source port each made socket bound, so a test can find the
+  // source port a drained packet leaves from by its socket.
+  std::map<folly::AsyncUDPSocket*, uint16_t> portBySocket;
   std::function<bool(uint16_t)> inUse = [](uint16_t) { return false; };
 
   std::function<std::pair<
@@ -41,8 +45,9 @@ struct SourcePortRecorder {
   socketMaker() {
     return [this](folly::EventBase* evb) {
       auto socket = std::make_unique<testing::NiceMock<MockUDPSocket>>(evb);
+      auto* raw = socket.get();
       ON_CALL(*socket, bindImpl(testing::_))
-          .WillByDefault([this](const folly::SocketAddress& address) {
+          .WillByDefault([this, raw](const folly::SocketAddress& address) {
             if (inUse(address.getPort())) {
               throw folly::AsyncSocketException(
                   folly::AsyncSocketException::NOT_OPEN,
@@ -50,6 +55,7 @@ struct SourcePortRecorder {
                   EADDRINUSE);
             }
             bound.push_back(address.getPort());
+            portBySocket[raw] = address.getPort();
           });
       return std::make_pair(
           std::unique_ptr<folly::AsyncUDPSocket>(std::move(socket)),

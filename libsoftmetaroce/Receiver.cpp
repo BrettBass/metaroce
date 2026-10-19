@@ -498,7 +498,8 @@ void Receiver::processIngress(
         VLOG(2) << "Ack prepared for flow id: " << rxFlow->getFlowId()
                 << " cfsn: " << maybeAck.value().getCumulativeFsn()
                 << " maxRcvdFsn: " << maybeAck.value().getMaxRcvdFsn();
-        rxFlow->setPendingAck(std::move(maybeAck.value()));
+        rxFlow->setPendingAck(
+            std::move(maybeAck.value()), ingress.sourceSocketAddress.getPort());
       }
     }
   } else if (opcode.isRnrCancel()) {

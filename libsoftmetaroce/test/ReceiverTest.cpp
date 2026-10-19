@@ -14,9 +14,13 @@
  * limitations under the License.
  */
 
+#include <atomic>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <set>
+#include <thread>
+#include <tuple>
 
 #include <folly/ScopeGuard.h>
 #include <folly/Synchronized.h>
@@ -25,6 +29,7 @@
 #include <folly/io/Cursor.h>
 #include <folly/io/IOBufQueue.h>
 #include <folly/io/async/EventBase.h>
+#include <folly/synchronization/Baton.h>
 #include <gmock/gmock-actions.h>
 #include <gtest/gtest.h>
 #include <libsoftmetaroce/CompletionQueue.h>
@@ -48,6 +53,7 @@
 #include <libsoftmetaroce/test/MockCongestionController.h>
 #include <libsoftmetaroce/test/MockUDPSocket.h>
 #include <libsoftmetaroce/test/PostToTag.h>
+#include <libsoftmetaroce/test/SourcePortRecorder.h>
 
 using namespace testing;
 using testing::AtLeast;
@@ -65,6 +71,9 @@ constexpr uint16_t kMetaRoceBindToPort = 0xace;
 constexpr uint16_t kMetaRoceSendToPort = 0xace;
 // Away from zero, so a case must use the base its receives were given.
 constexpr uint16_t kFixtureRxCsn = 101;
+// The two ingress UDP source ports the ACK source-port cases move between.
+constexpr uint16_t kIngressSourcePortA = 40000;
+constexpr uint16_t kIngressSourcePortB = 40001;
 
 class PayloadOnlyEncapsulation final : public Encapsulation {
  public:
@@ -350,9 +359,12 @@ class MockHrnrReceiver {
   }
 
   // Method to simulate receiving a packet
-  void simulateReceivePacket(std::unique_ptr<Packet> packet, uint8_t tos) {
+  void simulateReceivePacket(
+      std::unique_ptr<Packet> packet,
+      uint8_t tos,
+      uint16_t sourcePort = 12345) {
     // Create a source address
-    folly::SocketAddress sourceAddr("2001:db8::1", 12345);
+    folly::SocketAddress sourceAddr("2001:db8::1", sourcePort);
 
     // Get the PacketModifierSocket::ReadCallback interface
     auto readCallback =
@@ -391,9 +403,16 @@ class ReceiverTest : public ::testing::Test {
     buildQp();
   }
 
+  using SocketMaker = std::function<std::pair<
+      std::unique_ptr<folly::AsyncUDPSocket>,
+      std::unique_ptr<Modifier>>(folly::EventBase*)>;
+
   // Builds the fixture's QP, configured and then run, as a client's is.
   void buildQp(
-      SharedReceiveQueue* FOLLY_NULLABLE sharedReceiveQueue = nullptr) {
+      SharedReceiveQueue* FOLLY_NULLABLE sharedReceiveQueue = nullptr,
+      SocketMaker maker = mockUDPSocketMaker,
+      unsigned socketLimit = 2,
+      uint32_t rxFlowCount = 1) {
     // A tag is added before RTR, so a case rebuilding the queue pair starts it
     // over from where a client's begins.
     ibvQpStorage.state = IBV_QPS_RESET;
@@ -416,9 +435,9 @@ class ReceiverTest : public ::testing::Test {
     qp->setRemoteQpNum(srcQp);
     // Create a path with ID 0 for the QP
     mockSender_ =
-        std::make_shared<LimitedTestSender>(*arbiter, mockUDPSocketMaker);
-    mockSender_->setLimitNumSockets(2);
-    qp->setupFlows(1, 1, mockSender_.get());
+        std::make_shared<LimitedTestSender>(*arbiter, std::move(maker));
+    mockSender_->setLimitNumSockets(socketLimit);
+    qp->setupFlows(1, rxFlowCount, mockSender_.get());
     const bool configured =
         qp->getTag(kMetaRoceInitialTag)
             ->setReceiveSequenceNumbers(
@@ -4001,7 +4020,7 @@ TEST_F(ReceiverTest, SetPendingAckAccumulatesCeCount) {
                          .setCumulRespDeliveredMsn(0)
                          .setRateHints(0)
                          .setTimestamp(0);
-  rxFlow->setPendingAck(std::move(ackBuilder1).build());
+  rxFlow->setPendingAck(std::move(ackBuilder1).build(), kIngressSourcePortA);
 
   auto ackBuilder2 = AckHeader::AckHeaderBuilder()
                          .setCnpCE(2)
@@ -4012,7 +4031,7 @@ TEST_F(ReceiverTest, SetPendingAckAccumulatesCeCount) {
                          .setCumulRespDeliveredMsn(0)
                          .setRateHints(0)
                          .setTimestamp(0);
-  rxFlow->setPendingAck(std::move(ackBuilder2).build());
+  rxFlow->setPendingAck(std::move(ackBuilder2).build(), kIngressSourcePortA);
 
   auto egressPacket = rxFlow->getNextAckToSend();
   ASSERT_NE(egressPacket, nullptr) << "a coalesced ACK should be pending";
@@ -4044,7 +4063,7 @@ TEST_F(ReceiverTest, SetPendingAckSaturatesACoalescedCeCount) {
                          .setCumulRespDeliveredMsn(0)
                          .setRateHints(0)
                          .setTimestamp(0);
-  rxFlow->setPendingAck(std::move(atThreshold).build());
+  rxFlow->setPendingAck(std::move(atThreshold).build(), kIngressSourcePortA);
 
   auto alsoAtThreshold = AckHeader::AckHeaderBuilder()
                              .setCnpCE(kCeCountAckThreshold)
@@ -4055,7 +4074,8 @@ TEST_F(ReceiverTest, SetPendingAckSaturatesACoalescedCeCount) {
                              .setCumulRespDeliveredMsn(0)
                              .setRateHints(0)
                              .setTimestamp(0);
-  rxFlow->setPendingAck(std::move(alsoAtThreshold).build());
+  rxFlow->setPendingAck(
+      std::move(alsoAtThreshold).build(), kIngressSourcePortA);
 
   auto egressPacket = rxFlow->getNextAckToSend();
   ASSERT_NE(egressPacket, nullptr) << "a coalesced ACK should be pending";
@@ -4087,7 +4107,7 @@ TEST_F(ReceiverTest, AckSlotLifecycle) {
                         .setCumulRespDeliveredMsn(0)
                         .setRateHints(0)
                         .setTimestamp(0);
-  rxFlow->setPendingAck(std::move(ackBuilder).build());
+  rxFlow->setPendingAck(std::move(ackBuilder).build(), kIngressSourcePortA);
 
   auto first = rxFlow->getNextAckToSend();
   ASSERT_NE(first, nullptr) << "drain should return the pending ACK";
@@ -4255,6 +4275,266 @@ TEST_F(ReceiverTest, UndefinedBthPrefixSilentlyDropped) {
 
   EXPECT_NE(ibvQpStorage.state, IBV_QPS_ERR)
       << "an undefined BTH prefix should not affect QP state";
+}
+
+// Cases asserting which UDP source port a drained ACK leaves from. Each
+// rebuilds the QP on a recording socket maker and posts a receive per flow.
+class AckSourcePortTest : public ReceiverTest {
+ protected:
+  // `extraSockets` join the setup's socket on the flow's local address.
+  void rebuild(
+      unsigned socketLimit,
+      unsigned extraSockets,
+      uint32_t rxFlowCount = 1) {
+    qpNumToQp_.wlock()->clear();
+    mockSender_.reset();
+    buildQp(nullptr, ports_.socketMaker(), socketLimit, rxFlowCount);
+    for (unsigned i = 0; i < extraSockets; ++i) {
+      std::ignore =
+          mockSender_->getSocketIdFromAddress(folly::IPAddress("fc00::1"));
+    }
+    for (uint32_t i = 0; i < rxFlowCount; ++i) {
+      postReceiveWqe(recvBuffers_[i].data(), kBufferSize);
+    }
+  }
+
+  // Injects flow `id`'s SEND as if from `sourcePort`. Each flow has its own
+  // message, so flow 1 takes the msn and csn after flow 0's.
+  void
+  injectSend(uint16_t sourcePort, uint8_t tos = kEcnECT0, uint16_t id = 0) {
+    mockReceiver_->simulateReceivePacket(
+        buildTestDataPacket(
+            srcQp,
+            dstQp,
+            id,
+            fsn,
+            static_cast<uint16_t>(msn + id),
+            /*tag=*/0,
+            /*posn=*/0,
+            payload_.data(),
+            kBufferSize,
+            BaseHeader::Opcode::OperationType::SEND,
+            /*maybeImmData=*/std::nullopt,
+            /*padding=*/0,
+            static_cast<uint16_t>(kFixtureRxCsn + id)),
+        tos,
+        sourcePort);
+  }
+
+  // The QP map is untouched while a case runs, so the pointer stays valid
+  // after the lookup's lock is released.
+  RxFlow* rxFlowById(uint16_t id) {
+    return qpNumToQp_.rlock()->at(dstQp)->getRxFlowById(id);
+  }
+
+  uint16_t ackSourcePortOf(const std::unique_ptr<EgressPacket>& egress) const {
+    return ports_.portBySocket.at(egress->socketToSendOn->getSocket());
+  }
+
+  // The UDP source port flow `id`'s next ACK leaves from.
+  uint16_t selectedAckSourcePort(uint16_t id = 0) {
+    return ports_.portBySocket.at(mockSender_->getSocketById(
+        rxFlowById(id)->getSocketId(), EgressPacket::Kind::Ack));
+  }
+
+  // Injects flow `id`'s SEND as if from `sourcePort` and returns the UDP
+  // source port of the ACK for it, or 0 when no ACK was left to drain.
+  uint16_t ackSourcePortAfterSend(uint16_t sourcePort, uint16_t id = 0) {
+    injectSend(sourcePort, kEcnECT0, id);
+    const auto egress = rxFlowById(id)->getNextAckToSend();
+    EXPECT_NE(egress, nullptr)
+        << "every SEND, retransmitted or not, must be acknowledged";
+    return egress == nullptr ? 0 : ackSourcePortOf(egress);
+  }
+
+  static const AckHeader& ackHeaderOf(
+      const std::unique_ptr<EgressPacket>& egress) {
+    return CHECK_NOTNULL(dynamic_cast<AckPacket*>(egress->packet.get()))
+        ->getAckHeader();
+  }
+
+  SourcePortRecorder ports_;
+  static constexpr uint32_t kBufferSize = 64;
+  std::array<std::array<char, kBufferSize>, 2> recvBuffers_{};
+  std::array<char, kBufferSize> payload_{};
+};
+
+/*
+ * After the sender repaths, retransmitted data arrives from a new UDP source
+ * port. The ACK for it must leave from a different UDP source port,
+ * even though the retransmission's FSN was already received.
+ */
+TEST_F(AckSourcePortTest, MovesOnDuplicateFromNewSourcePort) {
+  rebuild(LimitedTestSender::kMaxSocketsNoLimit, /*extraSockets=*/1);
+  const uint16_t firstPort = ackSourcePortAfterSend(kIngressSourcePortA);
+
+  // The same FSN again: the peer's RTO repath retransmits what the lost ACK
+  // covered, from the new source port.
+  injectSend(kIngressSourcePortB);
+  const auto second = rxFlowById(flowId)->getNextAckToSend();
+  ASSERT_NE(second, nullptr)
+      << "a retransmission must be acknowledged even though its FSN was received";
+  EXPECT_NE(ackSourcePortOf(second), firstPort)
+      << "the ACK for data from a new source port must take a "
+         "different path back";
+  EXPECT_EQ(ackHeaderOf(second).getAckStatus(), AckStatus::ACK)
+      << "the moved ACK acknowledges an ordinary retransmission";
+  EXPECT_EQ(ackHeaderOf(second).getCumulativeFsn(), fsn)
+      << "the move must not disturb the ACK's coverage";
+}
+
+TEST_F(AckSourcePortTest, KeepsSourcePortWhileIngressSourcePortStable) {
+  rebuild(LimitedTestSender::kMaxSocketsNoLimit, /*extraSockets=*/1);
+  const uint16_t firstPort = ackSourcePortAfterSend(kIngressSourcePortA);
+
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_EQ(ackSourcePortAfterSend(kIngressSourcePortA), firstPort)
+        << "with the ingress source port unchanged, the ACK keeps its path";
+  }
+}
+
+/*
+ * With a drain at each step, every ingress source-port change moves the ACK.
+ * Two sockets cycle back to the first on the third drain.
+ */
+TEST_F(AckSourcePortTest, MovesAtEachDrainedChange) {
+  rebuild(/*socketLimit=*/2, /*extraSockets=*/1);
+  const uint16_t firstPort = ackSourcePortAfterSend(kIngressSourcePortA);
+  const uint16_t secondPort = ackSourcePortAfterSend(kIngressSourcePortB);
+  EXPECT_NE(secondPort, firstPort)
+      << "the first change must move the ACK source port";
+
+  const uint16_t thirdPort = ackSourcePortAfterSend(kIngressSourcePortA);
+  EXPECT_NE(thirdPort, secondPort)
+      << "the second change must move the ACK source port again";
+  EXPECT_EQ(thirdPort, firstPort)
+      << "with two sockets, the cycle returns to the first";
+}
+
+TEST_F(AckSourcePortTest, CoalescedChangesMoveOnce) {
+  rebuild(LimitedTestSender::kMaxSocketsNoLimit, /*extraSockets=*/1);
+  const uint16_t setupPort = selectedAckSourcePort();
+
+  injectSend(kIngressSourcePortA, kEcnCE);
+  injectSend(kIngressSourcePortB, kEcnCE);
+  injectSend(kIngressSourcePortA, kEcnCE);
+
+  const auto only = rxFlowById(flowId)->getNextAckToSend();
+  ASSERT_NE(only, nullptr) << "the three packets must leave one ACK to drain";
+  EXPECT_NE(ackSourcePortOf(only), setupPort)
+      << "a change that returns to the first source port still moves the ACK";
+  EXPECT_EQ(ackHeaderOf(only).getCnpCE(), 3)
+      << "every coalesced packet's CE mark must survive";
+  EXPECT_EQ(ackHeaderOf(only).getCumulativeFsn(), fsn)
+      << "the emitted ACK must describe the latest packet";
+  EXPECT_EQ(rxFlowById(flowId)->getNextAckToSend(), nullptr)
+      << "coalesced publications drain as a single ACK";
+}
+
+TEST_F(AckSourcePortTest, OtherFlowKeepsItsSourcePort) {
+  rebuild(
+      LimitedTestSender::kMaxSocketsNoLimit,
+      /*extraSockets=*/1,
+      /*rxFlowCount=*/2);
+  const uint16_t firstFlowPort =
+      ackSourcePortAfterSend(kIngressSourcePortA, /*id=*/0);
+  const uint16_t secondFlowPort =
+      ackSourcePortAfterSend(kIngressSourcePortA, /*id=*/1);
+
+  ASSERT_NE(
+      ackSourcePortAfterSend(kIngressSourcePortB, /*id=*/0), firstFlowPort)
+      << "precondition: the first flow's source-port change moves its ACK";
+  EXPECT_EQ(
+      ackSourcePortAfterSend(kIngressSourcePortA, /*id=*/1), secondFlowPort)
+      << "another flow's source-port change must not move this flow's ACK";
+}
+
+TEST_F(AckSourcePortTest, CreatesSocketWhenAloneWithRoom) {
+  rebuild(LimitedTestSender::kMaxSocketsNoLimit, /*extraSockets=*/0);
+  ASSERT_EQ(ports_.bound.size(), 2u)
+      << "precondition: setup leaves one socket id, a data/ACK pair";
+  const uint16_t firstPort = ackSourcePortAfterSend(kIngressSourcePortA);
+
+  EXPECT_NE(ackSourcePortAfterSend(kIngressSourcePortB), firstPort)
+      << "with no other socket, the move must create one";
+  EXPECT_EQ(
+      mockSender_->getAddressFromSocketId(rxFlowById(flowId)->getSocketId()),
+      folly::IPAddress("fc00::1"))
+      << "the ACK keeps the flow's local address while its source port moves";
+}
+
+TEST_F(AckSourcePortTest, KeepsSourcePortAtSocketLimit) {
+  rebuild(/*socketLimit=*/1, /*extraSockets=*/0);
+  ASSERT_EQ(ports_.bound.size(), 2u)
+      << "precondition: the limit leaves one socket id";
+  const uint16_t firstPort = ackSourcePortAfterSend(kIngressSourcePortA);
+
+  EXPECT_EQ(ackSourcePortAfterSend(kIngressSourcePortB), firstPort)
+      << "with no other socket and no room for one, the ACK keeps its socket";
+}
+
+// Under ThreadSanitizer, this checks that the publisher and the drainer share
+// the source-port change flag without a race.
+TEST_F(AckSourcePortTest, ConcurrentPublishAndDrainShareChangeFlag) {
+  rebuild(LimitedTestSender::kMaxSocketsNoLimit, /*extraSockets=*/1);
+  // Deliver first, so every racing packet is a duplicate re-ack; delivery
+  // itself is not what races here.
+  ASSERT_NE(ackSourcePortAfterSend(kIngressSourcePortA), 0)
+      << "precondition: the first packet must leave an ACK to drain";
+
+  constexpr int kPackets = 200;
+  // A gate per thread: a Baton takes a single waiter.
+  folly::Baton<> publisherStart;
+  folly::Baton<> drainerStart;
+  std::atomic<int> published{0};
+  std::atomic<bool> publisherDone{false};
+  std::atomic<int> drained{0};
+  std::atomic<int> badHeaders{0};
+
+  std::thread publisher([&] {
+    publisherStart.wait();
+    for (int i = 0; i < kPackets; ++i) {
+      injectSend(i % 2 == 0 ? kIngressSourcePortA : kIngressSourcePortB);
+      ++published;
+    }
+    publisherDone.store(true, std::memory_order_release);
+  });
+
+  // The slot coalesces, so fewer drains than publications is expected; what
+  // must hold is that every drained ACK is well-formed and draining ends.
+  std::thread drainer([&] {
+    drainerStart.wait();
+    bool done = false;
+    std::unique_ptr<EgressPacket> egress;
+    do {
+      // Read completion before the slot, so the drain that ends the loop
+      // follows the final publication.
+      done = publisherDone.load(std::memory_order_acquire);
+      egress = rxFlowById(flowId)->getNextAckToSend();
+      if (egress != nullptr) {
+        const auto& header = ackHeaderOf(egress);
+        if (header.getCumulativeFsn() != fsn || header.getMaxRcvdFsn() != fsn ||
+            egress->socketToSendOn == nullptr) {
+          ++badHeaders;
+        }
+        ++drained;
+      }
+    } while (!done || egress != nullptr);
+  });
+
+  publisherStart.post();
+  drainerStart.post();
+  publisher.join();
+  drainer.join();
+
+  EXPECT_EQ(published.load(), kPackets)
+      << "the publisher must have run, or the drainer raced nobody";
+  EXPECT_GT(drained.load(), 0)
+      << "the racing publications must leave ACKs to drain";
+  EXPECT_EQ(badHeaders.load(), 0)
+      << "every drained ACK must carry the retransmitted FSN on a socket";
+  EXPECT_EQ(rxFlowById(flowId)->getNextAckToSend(), nullptr)
+      << "the slot must be empty once the race is over";
 }
 
 } // namespace libsoftmetaroce

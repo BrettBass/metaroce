@@ -58,6 +58,9 @@ namespace {
 // arbiter registers each qpNum once, so a second Qp must not reuse it.
 constexpr uint32_t kSecondQpNum = 11;
 
+// The UDP source port of the data an ACK published directly acknowledges.
+constexpr uint16_t kIngressSourcePort = 40000;
+
 // processDataPacket validates payload size against the receive WQE, so a packet
 // that matches a WQE must carry its per-posn payload (one MTU here).
 const std::vector<char>& testPayload() {
@@ -5567,7 +5570,8 @@ TEST_F(QpTest, HrnrProbingSendsOneDataProbeDespiteQueuedAck) {
           .setCumulativeFsn(0)
           .setMaxRcvdFsn(0)
           .setTimestamp(0)
-          .build());
+          .build(),
+      kIngressSourcePort);
 
   // Enter blocked (as an HRNR NAK would) then probing (as the backoff-timer
   // expiry would); PROBING is only reachable from BLOCKED_TX.
@@ -5627,7 +5631,8 @@ TEST_F(QpTest, HrnrBlockedTxSendsAcksButNotData) {
           .setCumulativeFsn(0)
           .setMaxRcvdFsn(0)
           .setTimestamp(0)
-          .build());
+          .build(),
+      kIngressSourcePort);
 
   // Block on HRNR with a live backoff (as an HRNR NAK would): new data is held
   // until the backoff elapses, but acks still flow.
