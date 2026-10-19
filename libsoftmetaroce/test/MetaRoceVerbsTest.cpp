@@ -1925,6 +1925,187 @@ TEST_F(VerbsTest, PostSendWithEverySgeTheDeviceReportsIsAccepted) {
   EXPECT_EQ(verbs_.ibv_dereg_mr(mr), 0);
 }
 
+/*
+ * Each sge is validated under its own lkey, so one unregistered entry fails the
+ * work request as a whole even when the others are registered.
+ */
+TEST_F(VerbsTest, PostSendWithOneUnregisteredSgeCompletesInError) {
+  struct ibv_qp* ibvqp = fixtureQp();
+  ASSERT_NE(ibvqp, nullptr);
+
+  std::array<char, 64> registered{};
+  std::array<char, 64> unregistered{};
+  ibv_mr* mr =
+      verbs_.ibv_reg_mr_internal(pd_, registered.data(), registered.size(), 0);
+  ASSERT_NE(mr, nullptr);
+  std::array<ibv_sge, 2> sges{{
+      {.addr = reinterpret_cast<uint64_t>(registered.data()),
+       .length = registered.size(),
+       .lkey = mr->lkey},
+      {.addr = reinterpret_cast<uint64_t>(unregistered.data()),
+       .length = unregistered.size(),
+       .lkey = mr->lkey},
+  }};
+  struct ibv_send_wr send_wr{
+      .wr_id = 7,
+      .sg_list = sges.data(),
+      .num_sge = static_cast<int>(sges.size()),
+      .opcode = IBV_WR_SEND,
+      .send_flags = IBV_SEND_SIGNALED,
+  };
+  struct ibv_send_wr* bad_wr = nullptr;
+  ASSERT_EQ(verbs_.ibv_post_send(ibvqp, &send_wr, &bad_wr), 0)
+      << "an out-of-range SGE must be reported through a completion";
+
+  struct ibv_wc wc{};
+  ASSERT_TRUE(pollOneCompletion(verbs_, cq_, wc))
+      << "the local protection error must surface as a completion";
+  EXPECT_EQ(wc.status, IBV_WC_LOC_PROT_ERR)
+      << "the second sge lies outside the region its lkey registered";
+  EXPECT_EQ(wc.wr_id, 7) << "the completion must report the originating wr_id";
+
+  EXPECT_EQ(verbs_.ibv_destroy_qp(std::exchange(qp_, nullptr)), 0);
+  EXPECT_EQ(verbs_.ibv_dereg_mr(mr), 0);
+}
+
+TEST_F(VerbsTest, AnInlineSendCopiesItsSgesAroundEmptyOnes) {
+  qp_ = setup_qp(
+      verbs_,
+      cq_,
+      pd_,
+      folly::IPAddressV6("fc00::1"),
+      kDestQpNum,
+      IBV_MTU_2048,
+      /*sqSigAll=*/true,
+      /*maxRdAtomic=*/std::nullopt,
+      /*maxWr=*/0,
+      /*maxInlineData=*/64);
+  struct ibv_qp* ibvqp = qp_;
+  ASSERT_NE(ibvqp, nullptr);
+  auto* qp = verbs_.getQpByNum(MetaRoceVerbs::qpAndTagToQp(ibvqp->qp_num));
+  ASSERT_NE(qp, nullptr);
+  // A closed window keeps the WQE queued, so its payload can be read back.
+  qp->setCongestionController(
+      std::make_unique<NiceMock<MockCongestionController>>());
+
+  std::array<uint8_t, 16> first{};
+  std::array<uint8_t, 16> second{};
+  std::vector<uint8_t> expected;
+  for (auto* source : {&first, &second}) {
+    for (auto& byte : *source) {
+      byte = static_cast<uint8_t>(expected.size() + 1);
+      expected.push_back(byte);
+    }
+  }
+  const ibv_sge empty{.addr = 0, .length = 0};
+  std::array<ibv_sge, 5> sges{{
+      empty,
+      {.addr = reinterpret_cast<uint64_t>(first.data()),
+       .length = first.size()},
+      empty,
+      {.addr = reinterpret_cast<uint64_t>(second.data()),
+       .length = second.size()},
+      empty,
+  }};
+  struct ibv_send_wr send_wr{
+      .wr_id = 1,
+      .sg_list = sges.data(),
+      .num_sge = static_cast<int>(sges.size()),
+      .opcode = IBV_WR_SEND,
+      .send_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE,
+  };
+  struct ibv_send_wr* bad_wr = nullptr;
+  ASSERT_EQ(verbs_.ibv_post_send(ibvqp, &send_wr, &bad_wr), 0)
+      << "empty sges, null-addressed or not, must not stop an inline payload "
+         "being posted";
+  first.fill(0);
+  second.fill(0);
+
+  ASSERT_TRUE(qp->waitForWqesToBePosted(1, std::chrono::milliseconds(1000)))
+      << "precondition: the send reaches its tag to be read back";
+  const Wqe* const wqe = qp->getTag(MetaRoceVerbs::qpAndTagToTag(ibvqp->qp_num))
+                             ->getEarliestPendingWqe();
+  ASSERT_NE(wqe, nullptr);
+  ASSERT_EQ(wqe->getMessageSizeBytes(), expected.size())
+      << "the message is the non-empty sges' bytes only";
+  const folly::IOBuf payload =
+      wqe->makeSendPayloadView(0, qp->getMtu(), wqe->getMessageSizeBytes());
+  std::vector<uint8_t> sent;
+  for (const folly::ByteRange range : payload) {
+    sent.insert(sent.end(), range.begin(), range.end());
+  }
+  EXPECT_EQ(sent, expected)
+      << "the WQE must hold the bytes as posted, gathered in sge order, even "
+         "though the caller has since overwritten its sources";
+}
+
+TEST_F(VerbsTest, EmptySgesAreDroppedFromAPostedBuffer) {
+  struct ibv_qp* ibvqp = fixtureQp();
+  ASSERT_NE(ibvqp, nullptr);
+  auto* qp = verbs_.getQpByNum(MetaRoceVerbs::qpAndTagToQp(ibvqp->qp_num));
+  ASSERT_NE(qp, nullptr);
+  // A closed window keeps the WQE queued, so its buffer can be inspected.
+  qp->setCongestionController(
+      std::make_unique<NiceMock<MockCongestionController>>());
+
+  std::array<char, 64> buffer{};
+  ibv_mr* mr = verbs_.ibv_reg_mr_internal(pd_, buffer.data(), buffer.size(), 0);
+  ASSERT_NE(mr, nullptr);
+  std::array<ibv_sge, 2> sges{{
+      {.addr = 0, .length = 0, .lkey = 0xbadbad},
+      {.addr = reinterpret_cast<uint64_t>(buffer.data()),
+       .length = buffer.size(),
+       .lkey = mr->lkey},
+  }};
+  struct ibv_send_wr send_wr{
+      .wr_id = 1,
+      .sg_list = sges.data(),
+      .num_sge = static_cast<int>(sges.size()),
+      .opcode = IBV_WR_SEND,
+      .send_flags = IBV_SEND_SIGNALED,
+  };
+  struct ibv_send_wr* bad_wr = nullptr;
+  ASSERT_EQ(verbs_.ibv_post_send(ibvqp, &send_wr, &bad_wr), 0)
+      << "zero-length SGEs require no local-key validation";
+
+  ASSERT_TRUE(qp->waitForWqesToBePosted(1, std::chrono::milliseconds(1000)))
+      << "precondition: the send reaches its tag to be inspected";
+  const Wqe* const wqe = qp->getTag(MetaRoceVerbs::qpAndTagToTag(ibvqp->qp_num))
+                             ->getEarliestPendingWqe();
+  ASSERT_NE(wqe, nullptr);
+  EXPECT_FALSE(wqe->hasLocalSges())
+      << "dropping empty SGEs must preserve the single-buffer storage path";
+  EXPECT_EQ(wqe->getBufferAddress(), buffer.data())
+      << "the buffer is the one sge that holds bytes";
+  EXPECT_EQ(wqe->getMessageSizeBytes(), buffer.size())
+      << "the message is the bytes the sges hold";
+
+  EXPECT_EQ(verbs_.ibv_destroy_qp(std::exchange(qp_, nullptr)), 0);
+  EXPECT_EQ(verbs_.ibv_dereg_mr(mr), 0);
+}
+
+TEST_F(VerbsTest, AnAtomicWithTwoSgesIsRefused) {
+  struct ibv_qp* ibvqp = fixtureQp();
+  ASSERT_NE(ibvqp, nullptr);
+
+  std::array<uint64_t, 2> operand{};
+  std::array<ibv_sge, 2> sges{{
+      {.addr = reinterpret_cast<uint64_t>(&operand[0]), .length = 4},
+      {.addr = reinterpret_cast<uint64_t>(&operand[1]), .length = 4},
+  }};
+  struct ibv_send_wr atomic_wr{
+      .wr_id = 1,
+      .sg_list = sges.data(),
+      .num_sge = static_cast<int>(sges.size()),
+      .opcode = IBV_WR_ATOMIC_FETCH_AND_ADD,
+      .send_flags = IBV_SEND_SIGNALED,
+  };
+  struct ibv_send_wr* bad_wr = nullptr;
+  EXPECT_EQ(verbs_.ibv_post_send(ibvqp, &atomic_wr, &bad_wr), EINVAL)
+      << "this provider takes an atomic's operand from exactly one sge";
+  EXPECT_EQ(bad_wr, &atomic_wr) << "a rejected WR must be reported via bad_wr";
+}
+
 TEST_F(VerbsTest, PostSendWithNullSgListReturnsEinval) {
   struct ibv_qp* ibvqp = fixtureQp();
   ASSERT_NE(ibvqp, nullptr)
@@ -3377,6 +3558,97 @@ TEST_F(VerbsTest, ImmediateDataPropagation) {
   EXPECT_TRUE(wc.wc_flags & IBV_WC_WITH_IMM);
 
   EXPECT_EQ(verbs_.ibv_destroy_qp(ibvqp), 0);
+}
+
+/*
+ * A receive posted with several sges takes an arriving message across them in
+ * order, splitting bytes that cross an sge boundary.
+ */
+TEST_F(VerbsTest, AMultiSgeReceiveScattersAnArrivingSend) {
+  struct ibv_qp* ibvqp = fixtureQp();
+  ASSERT_NE(ibvqp, nullptr);
+  const auto qp = verbs_.getQpByNum(MetaRoceVerbs::qpAndTagToQp(ibvqp->qp_num));
+  ASSERT_NE(qp, nullptr);
+  auto tag = qp->getTag(MetaRoceVerbs::qpAndTagToTag(ibvqp->qp_num));
+
+  std::array<uint8_t, 30> first{};
+  std::array<uint8_t, 30> second{};
+  std::array<uint8_t, 40> third{};
+  std::array<ibv_sge, 3> sges{};
+  std::vector<ibv_mr*> mrs;
+  for (auto [sge, segment] :
+       {std::pair{&sges[0], folly::MutableByteRange(first)},
+        std::pair{&sges[1], folly::MutableByteRange(second)},
+        std::pair{&sges[2], folly::MutableByteRange(third)}}) {
+    ibv_mr* mr = verbs_.ibv_reg_mr_internal(
+        pd_, segment.data(), segment.size(), IBV_ACCESS_LOCAL_WRITE);
+    ASSERT_NE(mr, nullptr);
+    mrs.push_back(mr);
+    *sge = {
+        .addr = reinterpret_cast<uint64_t>(segment.data()),
+        .length = static_cast<uint32_t>(segment.size()),
+        .lkey = mr->lkey,
+    };
+  }
+  struct ibv_recv_wr rcv_wr{
+      .wr_id = 200,
+      .sg_list = sges.data(),
+      .num_sge = static_cast<int>(sges.size()),
+  };
+  struct ibv_recv_wr* bad_wr = nullptr;
+  ASSERT_EQ(verbs_.ibv_post_recv(ibvqp, &rcv_wr, &bad_wr), 0)
+      << "precondition: a receive of three registered sges is accepted";
+  ASSERT_TRUE(qp->waitForRWqesToBePosted(1, std::chrono::milliseconds(100)))
+      << "precondition: the receive is pending before the send arrives";
+  qp->setCongestionController(std::make_unique<MockCongestionController>());
+
+  std::array<uint8_t, 100> message{};
+  for (size_t i = 0; i < message.size(); ++i) {
+    message[i] = static_cast<uint8_t>(i + 1);
+  }
+  const auto csn = 0;
+  const auto msn = tag->getNextMsn();
+  const auto flowId = 0;
+  const auto dataHeader = DataHeader::DataHeaderBuilder()
+                              .setFsn(0)
+                              .setUna(0)
+                              .setAckRequest(false)
+                              .setPosn(0)
+                              .setMsn(msn)
+                              .setCsn(csn)
+                              .build();
+  const auto baseHeader =
+      BaseHeader::BaseHeaderBuilder()
+          .setSrcQp(qp->getLocalQpNum())
+          .setDstQp(qp->getRemoteQpNum())
+          .setOpcode(
+              BaseHeader::Opcode(BaseHeader::Opcode::OperationType::SEND_IMM_P))
+          .setVersion(0)
+          .setFlowId(flowId)
+          .build();
+  const DataPacket packet(
+      baseHeader, dataHeader, message.data(), message.size(), 0x1234);
+  tag->assignInitiatorMsnToReceiveWqeIfNeeded(csn, msn, qp->getMtu());
+  qp->getRxFlowById(flowId)->processDataPacket(&packet, kEcnECT0);
+
+  struct ibv_wc wc{};
+  ASSERT_TRUE(pollOneCompletion(verbs_, cq_, wc))
+      << "the whole message arrived, so the receive must complete";
+  EXPECT_EQ(wc.status, IBV_WC_SUCCESS)
+      << "every sge is registered for local write";
+  EXPECT_EQ(wc.wr_id, 200u) << "the completion must name the posted receive";
+  EXPECT_EQ(wc.byte_len, message.size())
+      << "the length reported is the message's, summed across sges";
+  std::vector<uint8_t> received(first.begin(), first.end());
+  received.insert(received.end(), second.begin(), second.end());
+  received.insert(received.end(), third.begin(), third.end());
+  EXPECT_EQ(received, std::vector<uint8_t>(message.begin(), message.end()))
+      << "the sges together must hold the message in order";
+
+  EXPECT_EQ(verbs_.ibv_destroy_qp(std::exchange(qp_, nullptr)), 0);
+  for (ibv_mr* mr : mrs) {
+    EXPECT_EQ(verbs_.ibv_dereg_mr(mr), 0);
+  }
 }
 
 /*

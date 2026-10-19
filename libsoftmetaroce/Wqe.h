@@ -138,8 +138,19 @@ struct Wqe {
     return sizeBytes_;
   }
 
+  // With several sges, the first non-empty one's address.
   [[nodiscard]] void* getBufferAddress() const {
     return address_;
+  }
+
+  [[nodiscard]] bool hasLocalSges() const {
+    return segmented_ != nullptr;
+  }
+
+  [[nodiscard]] const LocalSges& getLocalSges() const {
+    DCHECK(hasLocalSges())
+        << "a contiguous buffer keeps no sge list; check hasLocalSges()";
+    return segmented_->sges;
   }
 
   // The posn a request frame carries on the wire. It points to the start of
@@ -597,6 +608,7 @@ struct Wqe {
   }
 
   void* addressForPosnMtu(uint16_t posn, uint16_t mtu) {
+    DCHECK(!hasLocalSges()) << "addressForPosnMtu requires contiguous storage";
     CHECK_NE(address_, nullptr);
     CHECK_LT(mtu * posn, sizeBytes_);
     return (void*)((char*)address_ + (mtu * posn));
@@ -608,7 +620,7 @@ struct Wqe {
       uint16_t mtu,
       uint32_t payloadSizeBytes) const;
 
-  // Copies bytes into the buffer at posn's offset.
+  // Copies bytes into the buffer at posn's offset, across sges as needed.
   void deliverPosn(uint32_t posn, uint16_t mtu, folly::ByteRange bytes);
 
  protected:
@@ -640,7 +652,7 @@ struct Wqe {
       WorkType workType,
       std::optional<uint64_t> workReqId,
       std::optional<uint16_t> msn, // not initialized with ReceiveWqes
-      const LocalSges& sges,
+      LocalSges sges,
       uint16_t mtu,
       bool isVirtual,
       std::optional<uint32_t> immediateData,
@@ -658,9 +670,8 @@ struct Wqe {
     if (isInline && sizeBytes_ > 0) {
       copyInlineSges(sges);
       address_ = inlineData_.data();
-    } else {
-      CHECK_LE(sges.size(), 1u)
-          << "only an inline payload may span multiple SGEs";
+    } else if (sges.size() > 1) {
+      segmented_ = makeSegmentedBuffer(std::move(sges));
     }
   }
 
@@ -714,6 +725,15 @@ struct Wqe {
   std::optional<uint32_t> maybeImmediateData_;
   // Owns an inline payload copied from the work request; empty otherwise.
   std::vector<uint8_t> inlineData_;
+  // Allocated apart so a single-buffer work request does not reserve room for
+  // every sge.
+  struct SegmentedBuffer {
+    LocalSges sges;
+    // Non-owning views of the SGE memory.
+    folly::IOBuf chain;
+  };
+  static std::unique_ptr<SegmentedBuffer> makeSegmentedBuffer(LocalSges sges);
+  std::unique_ptr<SegmentedBuffer> segmented_;
 
   // Instrumentation: the full state, recorded where the audit flag is set,
   // and off otherwise.
@@ -723,13 +743,13 @@ struct Wqe {
 struct SendWqe : public Wqe {
   explicit SendWqe(
       uint64_t workReqId,
-      const LocalSges& sges,
+      LocalSges sges,
       uint16_t mtu,
       int send_flags = IBV_SEND_SIGNALED)
       : Wqe(WorkType::kSend,
             workReqId,
             std::nullopt, /* msn */
-            sges,
+            std::move(sges),
             mtu,
             false, /* isVirtual */
             std::nullopt, /*immediateData*/
@@ -746,11 +766,11 @@ struct SendWqe : public Wqe {
 struct SendWithImmWqe : public SendWqe {
   explicit SendWithImmWqe(
       uint64_t workReqId,
-      const LocalSges& sges,
+      LocalSges sges,
       uint16_t mtu,
       uint32_t immediateData,
       int send_flags = IBV_SEND_SIGNALED)
-      : SendWqe(workReqId, sges, mtu, send_flags) {
+      : SendWqe(workReqId, std::move(sges), mtu, send_flags) {
     setImmediateData(immediateData);
     workType_ = WorkType::kSendWithImm;
   }
@@ -758,7 +778,7 @@ struct SendWithImmWqe : public SendWqe {
 };
 
 struct ReceiveWqe : public Wqe {
-  explicit ReceiveWqe(uint64_t workReqId, const LocalSges& sges, uint16_t mtu)
+  explicit ReceiveWqe(uint64_t workReqId, LocalSges sges, uint16_t mtu)
       : Wqe(WorkType::kReceive,
             workReqId,
             std::nullopt, /* msn */
@@ -842,9 +862,10 @@ struct ReceiveWqe : public Wqe {
     // The packet field is a uint64_t; we store a pointer as a void *.
     // NOLINTNEXTLINE(performance-no-int-to-ptr)
     void* address = (void*)rdma_address;
-    if (address_ != address || sizeBytes_ != size) {
+    if (address_ != address || sizeBytes_ != size || hasLocalSges()) {
       address_ = address;
       sizeBytes_ = size;
+      segmented_.reset();
       updateMtu(mtu);
       // The key registered the buffer this replaces; the packet's rkey is what
       // validated the target.
@@ -888,7 +909,7 @@ struct ReadWriteWqe : public Wqe {
   explicit ReadWriteWqe(
       WorkType workType,
       uint64_t workReqId,
-      const LocalSges& sges,
+      LocalSges sges,
       uint16_t mtu,
       uint64_t remoteAddress,
       uint32_t rkey,
@@ -940,7 +961,7 @@ struct ReadWriteWqe : public Wqe {
 struct WriteWithImmWqe : public ReadWriteWqe {
   explicit WriteWithImmWqe(
       uint64_t workReqId,
-      const LocalSges& sges,
+      LocalSges sges,
       uint16_t mtu,
       uint64_t remoteAddress,
       uint32_t rkey,
@@ -949,7 +970,7 @@ struct WriteWithImmWqe : public ReadWriteWqe {
       : ReadWriteWqe(
             WorkType::kWriteWithImm,
             workReqId,
-            sges,
+            std::move(sges),
             mtu,
             remoteAddress,
             rkey,
@@ -965,7 +986,7 @@ struct WriteWithImmWqe : public ReadWriteWqe {
 struct ReadWithImmWqe : public ReadWriteWqe {
   explicit ReadWithImmWqe(
       uint64_t workReqId,
-      const LocalSges& sges,
+      LocalSges sges,
       uint16_t mtu,
       uint64_t remoteAddress,
       uint32_t rkey,
@@ -974,7 +995,7 @@ struct ReadWithImmWqe : public ReadWriteWqe {
       : ReadWriteWqe(
             WorkType::kReadWithImm,
             workReqId,
-            sges,
+            std::move(sges),
             mtu,
             remoteAddress,
             rkey,

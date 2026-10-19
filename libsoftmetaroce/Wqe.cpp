@@ -15,6 +15,7 @@
  */
 
 #include <arpa/inet.h>
+#include <folly/io/Cursor.h>
 #include <gflags/gflags.h>
 #include <algorithm>
 
@@ -30,6 +31,21 @@ namespace libsoftmetaroce {
 
 bool posnAuditingEnabled() {
   return FLAGS_libsoftmetaroce_audit_posn_state;
+}
+
+std::unique_ptr<Wqe::SegmentedBuffer> Wqe::makeSegmentedBuffer(LocalSges sges) {
+  auto segmented = std::make_unique<SegmentedBuffer>();
+  for (const LocalSge& sge : sges) {
+    if (&sge == &sges.front()) {
+      segmented->chain =
+          folly::IOBuf::wrapBufferAsValue(sge.address, sge.length);
+    } else {
+      segmented->chain.appendToChain(
+          folly::IOBuf::wrapBuffer(sge.address, sge.length));
+    }
+  }
+  segmented->sges = std::move(sges);
+  return segmented;
 }
 
 void Wqe::copyInlineSges(const LocalSges& sges) {
@@ -53,10 +69,17 @@ folly::IOBuf Wqe::makeSendPayloadView(
   const uint64_t offset = static_cast<uint64_t>(posn) * mtu;
   CHECK_LE(offset + payloadSizeBytes, sizeBytes_)
       << "a posn's payload lies within the message it belongs to";
-  CHECK_NE(address_, nullptr)
-      << "a nonempty contiguous payload requires a buffer";
-  return folly::IOBuf::wrapBufferAsValue(
-      static_cast<const char*>(address_) + offset, payloadSizeBytes);
+  if (!hasLocalSges()) {
+    CHECK_NE(address_, nullptr)
+        << "a nonempty contiguous payload requires a buffer";
+    return folly::IOBuf::wrapBufferAsValue(
+        static_cast<const char*>(address_) + offset, payloadSizeBytes);
+  }
+  folly::io::Cursor cursor(&segmented_->chain);
+  cursor.skip(offset);
+  folly::IOBuf payload;
+  cursor.clone(payload, payloadSizeBytes);
+  return payload;
 }
 
 void Wqe::deliverPosn(uint32_t posn, uint16_t mtu, folly::ByteRange bytes) {
@@ -65,10 +88,17 @@ void Wqe::deliverPosn(uint32_t posn, uint16_t mtu, folly::ByteRange bytes) {
   }
   CHECK_LE(bytes.size(), getPosnPayloadSizeBytes(posn, mtu))
       << "the receiver delivers no more than the posn holds";
-  std::copy(
-      bytes.begin(),
-      bytes.end(),
-      static_cast<uint8_t*>(addressForPosnMtu(posn, mtu)));
+  if (!hasLocalSges()) {
+    std::copy(
+        bytes.begin(),
+        bytes.end(),
+        static_cast<uint8_t*>(addressForPosnMtu(posn, mtu)));
+    return;
+  }
+  const uint64_t offset = static_cast<uint64_t>(posn) * mtu;
+  folly::io::RWPrivateCursor cursor(&segmented_->chain);
+  cursor.skip(offset);
+  cursor.push(bytes);
 }
 
 std::ostream& operator<<(std::ostream& os, const Wqe::WorkType& workType) {

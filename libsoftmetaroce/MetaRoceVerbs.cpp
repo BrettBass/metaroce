@@ -1793,8 +1793,8 @@ int MetaRoceVerbs::ibv_query_qp(
   }
   if (attr_mask & IBV_QP_CAP) {
     // Populate every cap field so a caller passing an uninitialized attr does
-    // not read indeterminate values. lsmr supports a single SGE, and the work
-    // request depths are the ones this Tag's create asked for.
+    // not read indeterminate values. The work request depths are the ones this
+    // Tag's create asked for.
     attr->cap.max_send_wr = tag->getSendQueueDepth();
     attr->cap.max_recv_wr = tag->getReceiveQueueDepth();
     attr->cap.max_send_sge = kMaxSgesPerWorkRequest;

@@ -366,17 +366,21 @@ std::optional<AckHeader> RxFlow::processNewDataPacket(
   if (wqe && opType == BaseHeader::Opcode::OperationType::READ_RESP) {
     // A read executed remotely; validate the local buffer before writing the
     // response into it. A bad local key (including an unregistered 0) is a
-    // local protection error with the buffer left untouched. One region must
-    // cover the whole destination: one lkey identifies one region, so a region
-    // covering only part of the buffer cannot serve the read.
+    // local protection error with the buffer left untouched.
     DCHECK(dynamic_cast<ReadWriteWqe*>(wqe) != nullptr);
+    const MemoryRegions& memoryRegions = qp_.getMemoryRegions();
     if (expectedPayloadSize != 0 &&
-        !qp_.getMemoryRegions().isValidLocal(
-            tag->getIbvQp().pd,
-            static_cast<char*>(wqe->getBufferAddress()),
-            wqe->getMessageSizeBytes(),
-            static_cast<ReadWriteWqe*>(wqe)->getLkey(),
-            IBV_ACCESS_LOCAL_WRITE)) {
+        !(wqe->hasLocalSges() ? memoryRegions.isValidLocal(
+                                    tag->getIbvQp().pd,
+                                    wqe->getLocalSges(),
+                                    wqe->getMessageSizeBytes(),
+                                    IBV_ACCESS_LOCAL_WRITE)
+                              : memoryRegions.isValidLocal(
+                                    tag->getIbvQp().pd,
+                                    static_cast<char*>(wqe->getBufferAddress()),
+                                    wqe->getMessageSizeBytes(),
+                                    static_cast<ReadWriteWqe*>(wqe)->getLkey(),
+                                    IBV_ACCESS_LOCAL_WRITE))) {
       failTag = true;
       failedMessage = {.opType = opType, .msn = msn, .status = kLocalProtErr};
       wqe = nullptr;

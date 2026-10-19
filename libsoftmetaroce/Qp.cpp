@@ -142,11 +142,14 @@ std::unique_ptr<DataPacket> Qp::buildDataPacket(
     bool isRetransmit,
     bool isTimeout,
     uint32_t rateHints) {
-  CHECK(!payload.isChained())
-      << "this packet builder requires a single-buffer payload";
-  const auto payloadSizeBytes = static_cast<uint32_t>(payload.length());
+  const auto payloadSizeBytes =
+      static_cast<uint32_t>(payload.computeChainDataLength());
+  // A payload within one buffer is sent from it in place; one that spans
+  // sges is gathered into a buffer the packet owns.
+  std::unique_ptr<folly::IOBuf> gathered =
+      payload.isChained() ? payload.cloneCoalesced() : nullptr;
   const void* const payloadAddress =
-      payloadSizeBytes == 0 ? nullptr : payload.data();
+      payloadSizeBytes == 0 || gathered != nullptr ? nullptr : payload.data();
   const auto operationType = operationTypeFromWqePosn(wqe, sndNxtPosn);
   const BaseHeader::Opcode opcode(operationType);
   const BaseHeader baseHeader = BaseHeader::BaseHeaderBuilder()
@@ -186,6 +189,10 @@ std::unique_ptr<DataPacket> Qp::buildDataPacket(
             .build();
     const auto maybeImmdt =
         opcode.hasImmData() ? wqe.getImmediateData() : std::nullopt;
+    if (gathered != nullptr) {
+      return std::make_unique<ReadWritePacket>(
+          baseHeader, dataHeader, rwHeader, std::move(gathered), maybeImmdt);
+    }
     return std::make_unique<ReadWritePacket>(
         baseHeader,
         dataHeader,
@@ -220,6 +227,10 @@ std::unique_ptr<DataPacket> Qp::buildDataPacket(
         (operationType == BaseHeader::Opcode::OperationType::SEND_IMM_P)
         ? wqe.getImmediateData()
         : std::nullopt;
+    if (gathered != nullptr) {
+      return std::make_unique<DataPacket>(
+          baseHeader, dataHeader, std::move(gathered), maybeImmdt);
+    }
     return std::make_unique<DataPacket>(
         baseHeader, dataHeader, payloadAddress, payloadSizeBytes, maybeImmdt);
   }

@@ -543,6 +543,42 @@ class ReceiverTest : public ::testing::Test {
     return readMsn;
   }
 
+  // Posts a read that scatters into `buffers`, each registered for local
+  // write under its own key except the one at `unregisteredIndex`.
+  uint16_t postSegmentedReadWqe(
+      const std::vector<folly::MutableByteRange>& buffers,
+      std::optional<size_t> unregisteredIndex = std::nullopt) {
+    auto lockedMap = qpNumToQp_.rlock();
+    const auto* qp = lockedMap->at(dstQp).get();
+    auto tag = qp->getTag(kMetaRoceInitialTag);
+    const uint16_t readMsn = tag->getNextMsn();
+    LocalSges localSges;
+    for (size_t i = 0; i < buffers.size(); ++i) {
+      const folly::MutableByteRange buffer = buffers[i];
+      const uint32_t lkey = i == unregisteredIndex
+          ? 0xbadbad
+          : mrs.reg_mr(
+                   nullptr,
+                   buffer.data(),
+                   buffer.size(),
+                   IBV_ACCESS_LOCAL_WRITE)
+                ->lkey;
+      localSges.push_back(
+          {.address = buffer.data(),
+           .length = static_cast<uint32_t>(buffer.size()),
+           .lkey = lkey});
+    }
+    auto readWqe = std::make_unique<ReadWriteWqe>(
+        Wqe::WorkType::kRead,
+        /*workReqId=*/42,
+        std::move(localSges),
+        qp->getMtu(),
+        /*remoteAddress=*/0x1000,
+        /*rkey=*/1);
+    postToTag(*tag, std::move(readWqe), qp->getMtu());
+    return readMsn;
+  }
+
   void postReceiveWqe(
       void* buffer,
       uint32_t bufferSize,
@@ -3634,6 +3670,88 @@ TEST_F(ReceiverTest, HandleReadResp) {
   // Verify the payload was actually written to the read buffer.
   EXPECT_EQ(std::memcmp(readBuffer, payload, kReadSize), 0)
       << "READ_RESP payload should be written to the read buffer";
+}
+
+/*
+ * A read posted with several sges takes its response across them in order,
+ * each sge validated under its own key.
+ */
+TEST_F(ReceiverTest, AReadResponseScattersAcrossTheReadsSges) {
+  std::vector<uint8_t> first(1000, 'x');
+  std::vector<uint8_t> second(2000, 'x');
+  std::vector<uint8_t> third(1096, 'x');
+  const uint16_t readMsn = postSegmentedReadWqe(
+      {folly::MutableByteRange(first.data(), first.size()),
+       folly::MutableByteRange(second.data(), second.size()),
+       folly::MutableByteRange(third.data(), third.size())});
+
+  std::vector<uint8_t> payload(first.size() + second.size() + third.size());
+  for (size_t i = 0; i < payload.size(); ++i) {
+    payload[i] = static_cast<uint8_t>(i % 251);
+  }
+  auto readRespPacket = buildTestDataPacket(
+      srcQp,
+      dstQp,
+      flowId,
+      fsn,
+      readMsn,
+      /*tag=*/0,
+      /*posn=*/0,
+      payload.data(),
+      static_cast<uint32_t>(payload.size()),
+      BaseHeader::Opcode::OperationType::READ_RESP);
+  EXPECT_CALL(*mockSocket_, write(_, _)).Times(0);
+  mockReceiver_->simulateReceivePacket(std::move(readRespPacket), kEcnECT0);
+
+  EXPECT_NE(ibvQpStorage.state, IBV_QPS_ERR)
+      << "every sge is registered for local write, so the response is valid";
+  std::vector<uint8_t> scattered(first);
+  scattered.insert(scattered.end(), second.begin(), second.end());
+  scattered.insert(scattered.end(), third.begin(), third.end());
+  EXPECT_EQ(scattered, payload)
+      << "each response byte must land at its offset, whichever sge holds it";
+}
+
+/*
+ * Each sge's key identifies its own region, so one unregistered sge fails the
+ * read even where the others are valid, and no byte reaches any of them.
+ */
+TEST_F(ReceiverTest, AReadWithOneUnregisteredSgeWritesNoBytes) {
+  std::vector<uint8_t> first(1000, 'x');
+  std::vector<uint8_t> second(2000, 'x');
+  std::vector<uint8_t> third(1096, 'x');
+  const uint16_t readMsn = postSegmentedReadWqe(
+      {folly::MutableByteRange(first.data(), first.size()),
+       folly::MutableByteRange(second.data(), second.size()),
+       folly::MutableByteRange(third.data(), third.size())},
+      /*unregisteredIndex=*/1);
+
+  std::vector<uint8_t> payload(
+      first.size() + second.size() + third.size(), 'R');
+  auto readRespPacket = buildTestDataPacket(
+      srcQp,
+      dstQp,
+      flowId,
+      fsn,
+      readMsn,
+      /*tag=*/0,
+      /*posn=*/0,
+      payload.data(),
+      static_cast<uint32_t>(payload.size()),
+      BaseHeader::Opcode::OperationType::READ_RESP);
+  mockReceiver_->simulateReceivePacket(std::move(readRespPacket), kEcnECT0);
+
+  for (const auto* buffer : {&first, &second, &third}) {
+    EXPECT_EQ(
+        std::count(buffer->begin(), buffer->end(), 'x'),
+        static_cast<std::ptrdiff_t>(buffer->size()))
+        << "the read reports a protection error, so no sge may take any of "
+           "the response, including the registered ones";
+  }
+  auto lockedMap = qpNumToQp_.rlock();
+  EXPECT_TRUE(
+      lockedMap->at(dstQp)->getTag(kMetaRoceInitialTag)->isInErrorState())
+      << "a local protection error must put the tag in error";
 }
 
 TEST_F(ReceiverTest, ConcurrentReadsCompleteInTheOrderTheyWereIssued) {

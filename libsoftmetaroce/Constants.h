@@ -76,8 +76,7 @@ inline constexpr uint32_t kMaxCqEntries = 32768;
 inline constexpr uint32_t kMaxCompletionQueues = 1048576;
 inline constexpr uint32_t kMaxQueuePairs = 1048576;
 inline constexpr uint32_t kMaxQpWorkRequests = 32768;
-// A work request has at most one scatter-gather entry.
-inline constexpr uint32_t kMaxSgesPerWorkRequest = 1;
+inline constexpr uint32_t kMaxSgesPerWorkRequest = 8;
 // Outstanding RDMA reads and atomics per queue pair: the ceiling of the uint8_t
 // field the verbs attributes use, since lsmr keeps no responder table.
 inline constexpr uint8_t kMaxOutstandingReadAtomic = 255;

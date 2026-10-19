@@ -819,12 +819,19 @@ bool Tag::recordLocalProtectionErrorIfUnwritable(
   if (wqe.getMessageSizeBytes() == 0) {
     return false;
   }
-  if (memoryRegions.isValidLocal(
-          receiveProtectionDomain(),
-          static_cast<char*>(wqe.getBufferAddress()),
-          wqe.getMessageSizeBytes(),
-          static_cast<ReceiveWqe&>(wqe).getLkey(),
-          IBV_ACCESS_LOCAL_WRITE)) {
+  const bool valid = wqe.hasLocalSges()
+      ? memoryRegions.isValidLocal(
+            receiveProtectionDomain(),
+            wqe.getLocalSges(),
+            wqe.getMessageSizeBytes(),
+            IBV_ACCESS_LOCAL_WRITE)
+      : memoryRegions.isValidLocal(
+            receiveProtectionDomain(),
+            static_cast<char*>(wqe.getBufferAddress()),
+            wqe.getMessageSizeBytes(),
+            static_cast<ReceiveWqe&>(wqe).getLkey(),
+            IBV_ACCESS_LOCAL_WRITE);
+  if (valid) {
     return false;
   }
   // Reported by the flush that follows, in posting order. Completing it here

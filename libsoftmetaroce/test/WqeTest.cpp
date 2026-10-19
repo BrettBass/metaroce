@@ -1623,6 +1623,97 @@ TEST_F(WqeTest, AReceiveShortenedToItsLastPacketKeepsTheAuditorInStep) {
          "past the end having gone with the truncation";
 }
 
+/*
+ * A send posted with several sges sends them back to back, so a packet whose
+ * bytes cross an sge boundary carries the end of one and the start of the next.
+ */
+TEST_F(WqeTest, ASegmentedSendGathersEachPosnFromTheSgesItSpans) {
+  constexpr uint16_t mtu = 256;
+  std::vector<uint8_t> first(100);
+  std::vector<uint8_t> second(500);
+  std::vector<uint8_t> third(168);
+  std::vector<uint8_t> message;
+  for (auto* buffer : {&first, &second, &third}) {
+    for (auto& byte : *buffer) {
+      byte = static_cast<uint8_t>(message.size() * 7);
+      message.push_back(byte);
+    }
+  }
+  const SendWqe wqe(
+      1,
+      LocalSges{
+          {.address = first.data(), .length = 100},
+          {.address = second.data(), .length = 500},
+          {.address = third.data(), .length = 168},
+      },
+      mtu);
+  ASSERT_EQ(wqe.getNumPosn(), 3u)
+      << "precondition: 768 bytes at a 256-byte mtu make three posns";
+
+  std::vector<uint8_t> sent;
+  for (uint32_t posn = 0; posn < wqe.getNumPosn(); ++posn) {
+    const uint32_t size = wqe.getPosnPayloadSizeBytes(posn, mtu);
+    const folly::IOBuf payload = wqe.makeSendPayloadView(posn, mtu, size);
+    EXPECT_EQ(payload.computeChainDataLength(), size)
+        << "posn " << posn << " must carry its whole payload, however many "
+        << "sges it spans";
+    for (const folly::ByteRange range : payload) {
+      sent.insert(sent.end(), range.begin(), range.end());
+    }
+  }
+  EXPECT_EQ(sent, message)
+      << "the packets together must carry the sges in order, with nothing "
+         "dropped or repeated at a boundary";
+
+  EXPECT_TRUE(wqe.makeSendPayloadView(0, mtu, mtu).isChained())
+      << "posn 0 spans the first two sges, so it references both";
+  EXPECT_FALSE(wqe.makeSendPayloadView(1, mtu, mtu).isChained())
+      << "posn 1 lies within the second sge, so it is sent in place";
+}
+
+/*
+ * A receive posted with several sges fills them in order, so a packet whose
+ * offset crosses an sge boundary is split between them.
+ */
+TEST_F(WqeTest, ASegmentedReceiveScattersEachPosnAcrossItsSges) {
+  constexpr uint16_t mtu = 256;
+  std::vector<uint8_t> first(10, 0);
+  std::vector<uint8_t> second(400, 0);
+  std::vector<uint8_t> third(102, 0);
+  ReceiveWqe wqe(
+      1,
+      LocalSges{
+          {.address = first.data(), .length = 10},
+          {.address = second.data(), .length = 400},
+          {.address = third.data(), .length = 102},
+      },
+      mtu);
+
+  std::vector<uint8_t> message(512);
+  for (size_t i = 0; i < message.size(); ++i) {
+    message[i] = static_cast<uint8_t>(i * 13 + 1);
+  }
+  // Out of order, as packets may arrive.
+  wqe.deliverPosn(1, mtu, folly::ByteRange(message.data() + mtu, mtu));
+  wqe.deliverPosn(0, mtu, folly::ByteRange(message.data(), mtu));
+
+  std::vector<uint8_t> received(first);
+  received.insert(received.end(), second.begin(), second.end());
+  received.insert(received.end(), third.begin(), third.end());
+  EXPECT_EQ(received, message)
+      << "each byte must land at its message offset, whichever sge holds it";
+}
+
+TEST_F(WqeTest, NoMoreThanOneSgeKeepsTheBufferContiguous) {
+  std::array<uint8_t, 64> buffer{};
+  EXPECT_FALSE(
+      SendWqe(1, LocalSges{{.address = buffer.data(), .length = 64}}, 256)
+          .hasLocalSges())
+      << "a single-buffer work request must not pay for segmented storage";
+  EXPECT_FALSE(SendWqe(1, LocalSges{}, 256).hasLocalSges())
+      << "a zero-length work request has no buffer to segment";
+}
+
 TEST_F(WqeTest, AContiguousSendPayloadIsReferencedInPlaceAtItsOffset) {
   constexpr uint16_t mtu = 256;
   std::vector<uint8_t> buffer(600);
