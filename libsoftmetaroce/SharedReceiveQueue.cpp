@@ -49,7 +49,7 @@ bool SharedReceiveQueue::tryPost(SharedReceive receive) {
     if (posted_.size() >= maxWorkRequests_) {
       return false;
     }
-    posted_.push_back(receive);
+    posted_.push_back(std::move(receive));
     // Selected in the same step: two posts must not both claim the depth one
     // of them added.
     if (cancelRnrForRefusedTag_ != nullptr) {
@@ -95,7 +95,7 @@ std::optional<SharedReceive> SharedReceiveQueue::tryTakeOldestLeavingAtLeast(
       }
       return std::nullopt;
     }
-    oldest = posted_.front();
+    oldest = std::move(posted_.front());
     posted_.pop_front();
     std::erase_if(refusedTags_, [&take](const RecordedWaiter& recorded) {
       return recorded.taker == take.taker;

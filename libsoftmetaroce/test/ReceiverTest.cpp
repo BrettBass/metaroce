@@ -2430,10 +2430,7 @@ TEST_F(ReceiverTest, ZeroPayloadWriteImmDrawsNoSharedReceive) {
 
   char receiveBuffer[4096] = {};
   ASSERT_TRUE(sharedQueue.tryPost(
-      SharedReceive{
-          .workRequestId = 777,
-          .address = receiveBuffer,
-          .length = sizeof(receiveBuffer)}))
+      SharedReceive{.workRequestId = 777, .sges = oneSge(receiveBuffer)}))
       << "precondition: the queue holds the receive the immediate would draw";
 
   char regionBuffer[4096] = {};

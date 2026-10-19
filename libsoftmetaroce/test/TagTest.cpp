@@ -255,14 +255,12 @@ TEST_F(TagTest, AReorderedArrivalTakesTheBufferThatWasWaiting) {
   ASSERT_TRUE(sharedQueue.tryPost(
       SharedReceive{
           .workRequestId = kFirstPosted,
-          .address = buffer_->data(),
-          .length = kMtu}))
+          .sges = oneSge(buffer_->data(), kMtu)}))
       << "precondition: the queue holds the receive posted first";
   ASSERT_TRUE(sharedQueue.tryPost(
       SharedReceive{
           .workRequestId = kSecondPosted,
-          .address = buffer_->data() + kMtu,
-          .length = kMtu}))
+          .sges = oneSge(buffer_->data() + kMtu, kMtu)}))
       << "precondition: the queue holds the receive posted second";
 
   // The later csn arrives first.
@@ -325,9 +323,7 @@ TEST_F(TagTest, AWriteToABadAddressRefusedByASharedQueueRecordsNoTag) {
 
   ASSERT_TRUE(sharedQueue.tryPost(
       SharedReceive{
-          .workRequestId = kWorkReqId,
-          .address = buffer_->data(),
-          .length = kMtu}))
+          .workRequestId = kWorkReqId, .sges = oneSge(buffer_->data(), kMtu)}))
       << "precondition: a receive arrives for any waiter the refusal left";
 
   EXPECT_TRUE(wokenTags.empty())
@@ -360,9 +356,7 @@ TEST_F(TagTest, AWriteRefusedByASharedQueueRecordsItsTagThere) {
 
   ASSERT_TRUE(sharedQueue.tryPost(
       SharedReceive{
-          .workRequestId = kWorkReqId,
-          .address = buffer_->data(),
-          .length = kMtu}))
+          .workRequestId = kWorkReqId, .sges = oneSge(buffer_->data(), kMtu)}))
       << "precondition: a receive arrives for whatever waiter was recorded";
 
   EXPECT_EQ(wokenTags, (std::vector<uint8_t>{kTagNum}))
@@ -384,8 +378,7 @@ TEST_F(TagTest, ACsnRefusedByAnEmptyQueueTakesTheBufferPostedAfterIt) {
   ASSERT_TRUE(sharedQueue.tryPost(
       SharedReceive{
           .workRequestId = kPostedAfter,
-          .address = buffer_->data(),
-          .length = kMtu}))
+          .sges = oneSge(buffer_->data(), kMtu)}))
       << "precondition: the client posts a receive the retransmission can take";
 
   ASSERT_TRUE(tag_->assignInitiatorMsnToReceiveWqeIfNeeded(
@@ -442,9 +435,7 @@ TEST_F(TagTest, AFailingTagLeavesTheSharedQueueAlone) {
   constexpr uint64_t kUntouched = 910;
   ASSERT_TRUE(sharedQueue.tryPost(
       SharedReceive{
-          .workRequestId = kUntouched,
-          .address = buffer_->data(),
-          .length = kMtu}))
+          .workRequestId = kUntouched, .sges = oneSge(buffer_->data(), kMtu)}))
       << "precondition: the queue holds a receive the failing tag could take";
 
   ibvQp_->state = IBV_QPS_ERR;
@@ -479,7 +470,7 @@ TEST_F(TagTest, ARefusedTagIsTheOneTheNextReceiveCancelsFor) {
   // receive and this one is refused.
   ASSERT_TRUE(sharedQueue.tryPost(
       SharedReceive{
-          .workRequestId = 900, .address = buffer_->data(), .length = kMtu}))
+          .workRequestId = 900, .sges = oneSge(buffer_->data(), kMtu)}))
       << "precondition: the queue holds the receive the csn ahead needs";
   ASSERT_FALSE(tag_->assignInitiatorMsnToReceiveWqeIfNeeded(
       kFixtureRxCsn + 1, /*msn=*/2, kMtu))
@@ -488,9 +479,7 @@ TEST_F(TagTest, ARefusedTagIsTheOneTheNextReceiveCancelsFor) {
 
   ASSERT_TRUE(sharedQueue.tryPost(
       SharedReceive{
-          .workRequestId = 901,
-          .address = buffer_->data() + kMtu,
-          .length = kMtu}));
+          .workRequestId = 901, .sges = oneSge(buffer_->data() + kMtu, kMtu)}));
   EXPECT_EQ(
       canceledTags,
       (std::vector<std::pair<uint32_t, uint8_t>>{{kQpNum, kTagNum}}))
@@ -516,7 +505,7 @@ TEST_F(TagTest, ABrnrSuppressedTakeRecordsNoTag) {
 
   ASSERT_TRUE(sharedQueue.tryPost(
       SharedReceive{
-          .workRequestId = 900, .address = buffer_->data(), .length = kMtu}))
+          .workRequestId = 900, .sges = oneSge(buffer_->data(), kMtu)}))
       << "precondition: the queue holds the receive the csn ahead needs";
   {
     const gflags::FlagSaver saver;
@@ -528,9 +517,7 @@ TEST_F(TagTest, ABrnrSuppressedTakeRecordsNoTag) {
 
   ASSERT_TRUE(sharedQueue.tryPost(
       SharedReceive{
-          .workRequestId = 901,
-          .address = buffer_->data() + kMtu,
-          .length = kMtu}))
+          .workRequestId = 901, .sges = oneSge(buffer_->data() + kMtu, kMtu)}))
       << "precondition: a second receive arrives after the refusal";
   EXPECT_TRUE(canceledTags.empty())
       << "the suppressed refusal recorded no waiter, so the post cancels for "
@@ -550,8 +537,7 @@ TEST_F(TagTest, AMessageIsRefusedUnlessItLeavesTheCsnsAheadTheirReceives) {
     ASSERT_TRUE(sharedQueue.tryPost(
         SharedReceive{
             .workRequestId = 900 + i,
-            .address = buffer_->data() + i * kMtu,
-            .length = kMtu}))
+            .sges = oneSge(buffer_->data() + i * kMtu, kMtu)}))
         << "precondition: the queue holds receive " << i;
   }
 
@@ -580,9 +566,7 @@ TEST_F(TagTest, AReceiveCompletingOnASkippedCsnIsRefusedThenFlushed) {
   for (uint64_t i = 0; i < 4; ++i) {
     ASSERT_TRUE(sharedQueue.tryPost(
         SharedReceive{
-            .workRequestId = 950 + i,
-            .address = buffer_->data(),
-            .length = kMtu}))
+            .workRequestId = 950 + i, .sges = oneSge(buffer_->data(), kMtu)}))
         << "precondition: the queue holds receive " << i;
   }
 
@@ -624,9 +608,7 @@ TEST_F(TagTest, AnAckedVirtualSendOverASkippedCsnReportsTheRefusal) {
   for (uint64_t i = 0; i < 4; ++i) {
     ASSERT_TRUE(sharedQueue.tryPost(
         SharedReceive{
-            .workRequestId = 960 + i,
-            .address = buffer_->data(),
-            .length = kMtu}))
+            .workRequestId = 960 + i, .sges = oneSge(buffer_->data(), kMtu)}))
         << "precondition: the queue holds receive " << i;
   }
 
@@ -686,9 +668,7 @@ TEST_F(TagTest, AWriteWithImmediateToABadAddressStillTakesABuffer) {
   constexpr uint64_t kTakenId = 800;
   ASSERT_TRUE(sharedQueue.tryPost(
       SharedReceive{
-          .workRequestId = kTakenId,
-          .address = buffer_->data(),
-          .length = kMtu}))
+          .workRequestId = kTakenId, .sges = oneSge(buffer_->data(), kMtu)}))
       << "precondition: the queue holds the receive the immediate consumes";
 
   ReadWriteHeader rwHeader(0x12345678, 999, 1000); // Invalid address and key

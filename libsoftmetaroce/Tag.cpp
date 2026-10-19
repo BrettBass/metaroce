@@ -658,7 +658,7 @@ std::unique_ptr<ReceiveWqe> Tag::takeReceiveFromSharedQueue(
   // A refusal that sends no BRNR starts no backoff, so it records nothing.
   const bool brnrEnabled =
       refusalRaisesBrnr && !FLAGS_libsoftmetaroce_dont_send_brnr;
-  const std::optional<SharedReceive> taken =
+  std::optional<SharedReceive> taken =
       CHECK_NOTNULL(sharedReceiveQueue_)
           ->tryTakeOldestLeavingAtLeast(
               missingAhead,
@@ -671,13 +671,7 @@ std::unique_ptr<ReceiveWqe> Tag::takeReceiveFromSharedQueue(
     return nullptr;
   }
   auto receiveWqe = std::make_unique<ReceiveWqe>(
-      taken->workRequestId,
-      LocalSges{{
-          .address = taken->address,
-          .length = taken->length,
-          .lkey = taken->localKey,
-      }},
-      mtu);
+      taken->workRequestId, std::move(taken->sges), mtu);
   receiveWqe->setCsn(csn);
   return receiveWqe;
 }

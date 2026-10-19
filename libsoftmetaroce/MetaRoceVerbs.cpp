@@ -1434,6 +1434,28 @@ int MetaRoceVerbs::ibv_destroy_srq(struct ibv_srq* srq) {
   return 0;
 }
 
+namespace {
+
+// Drops zero-length SGEs, which require no local memory validation.
+LocalSges resolveLocalSges(
+    const MemoryRegions& memoryRegions,
+    const ibv_pd* pd,
+    std::span<const ibv_sge> sges) {
+  LocalSges result;
+  for (const ibv_sge& sge : sges) {
+    if (sge.length != 0) {
+      result.push_back({
+          .address = memoryRegions.localAddressOf(pd, sge.addr, sge.lkey),
+          .length = sge.length,
+          .lkey = sge.lkey,
+      });
+    }
+  }
+  return result;
+}
+
+} // namespace
+
 int MetaRoceVerbs::ibv_post_srq_recv(
     struct ibv_srq* srq,
     struct ibv_recv_wr* recv_wr,
@@ -1457,24 +1479,18 @@ int MetaRoceVerbs::ibv_post_srq_recv(
   // the queue is full, and the refusal points at the work request it looped
   // to.
   for (struct ibv_recv_wr* wr = recv_wr; wr != nullptr; wr = wr->next) {
-    const struct ibv_sge* sgList = wr->sg_list;
-    if (wr->num_sge < 0 ||
-        static_cast<uint32_t>(wr->num_sge) > queue->getMaxSge() ||
-        (wr->num_sge != 0 && sgList == nullptr)) {
+    const std::optional<ValidatedSgeList> sgeList =
+        validatedSgeList(wr->sg_list, wr->num_sge);
+    if (!sgeList || sgeList->sges.size() > queue->getMaxSge()) {
       *bad_recv_wr = wr;
       return withErrno(EINVAL);
     }
-    static_assert(
-        kMaxSrqSges == 1, "SharedReceive holds one scatter-gather entry");
-    SharedReceive receive{.workRequestId = wr->wr_id};
-    if (wr->num_sge == 1) {
-      const struct ibv_sge& sge = *CHECK_NOTNULL(sgList);
-      receive.address = memoryRegions_.localAddressOf(
-          queue->getProtectionDomain(), sge.addr, sge.lkey);
-      receive.length = sge.length;
-      receive.localKey = sge.lkey;
-    }
-    if (!queue->tryPost(receive)) {
+    SharedReceive receive{
+        .workRequestId = wr->wr_id,
+        .sges = resolveLocalSges(
+            memoryRegions_, queue->getProtectionDomain(), sgeList->sges),
+    };
+    if (!queue->tryPost(std::move(receive))) {
       *bad_recv_wr = wr;
       return withErrno(ENOMEM);
     }
@@ -2235,24 +2251,6 @@ LocalSges makeInlineSourceSges(std::span<const ibv_sge> sges) {
           // Inline addr is a virtual address, independent of the lkey.
           // NOLINTNEXTLINE(performance-no-int-to-ptr)
           .address = reinterpret_cast<void*>(sge.addr),
-          .length = sge.length,
-          .lkey = sge.lkey,
-      });
-    }
-  }
-  return result;
-}
-
-// Drops zero-length SGEs, which require no local memory validation.
-LocalSges resolveLocalSges(
-    const MemoryRegions& memoryRegions,
-    const ibv_pd* pd,
-    std::span<const ibv_sge> sges) {
-  LocalSges result;
-  for (const ibv_sge& sge : sges) {
-    if (sge.length != 0) {
-      result.push_back({
-          .address = memoryRegions.localAddressOf(pd, sge.addr, sge.lkey),
           .length = sge.length,
           .lkey = sge.lkey,
       });

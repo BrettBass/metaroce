@@ -19,6 +19,7 @@
 #include <folly/Synchronized.h>
 
 #include <libsoftmetaroce/Constants.h>
+#include <libsoftmetaroce/SgeList.h>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -33,9 +34,7 @@ namespace libsoftmetaroce {
 // A receive `ibv_post_srq_recv` took, held until a queue pair takes it.
 struct SharedReceive {
   uint64_t workRequestId{0};
-  void* address{nullptr};
-  uint32_t length{0};
-  uint32_t localKey{0};
+  LocalSges sges;
 };
 
 struct SharedReceiveTaker {
