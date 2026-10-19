@@ -32,6 +32,17 @@ bool posnAuditingEnabled() {
   return FLAGS_libsoftmetaroce_audit_posn_state;
 }
 
+void Wqe::copyInlineSges(const LocalSges& sges) {
+  inlineData_.reserve(sizeBytes_);
+  for (const LocalSge& sge : sges) {
+    CHECK_NE(sge.address, nullptr)
+        << "postSendWr refuses an inline sge that has bytes and no address";
+    const folly::ByteRange source(
+        static_cast<const uint8_t*>(sge.address), sge.length);
+    inlineData_.insert(inlineData_.end(), source.begin(), source.end());
+  }
+}
+
 folly::IOBuf Wqe::makeSendPayloadView(
     uint32_t posn,
     uint16_t mtu,

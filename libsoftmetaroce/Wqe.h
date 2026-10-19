@@ -655,14 +655,16 @@ struct Wqe {
             mtu,
             isVirtual,
             immediateData) {
-    CHECK_LE(sges.size(), 1u) << "this WQE supports at most one SGE";
     if (isInline && sizeBytes_ > 0) {
-      inlineData_.assign(
-          static_cast<const uint8_t*>(address_),
-          static_cast<const uint8_t*>(address_) + sizeBytes_);
+      copyInlineSges(sges);
       address_ = inlineData_.data();
+    } else {
+      CHECK_LE(sges.size(), 1u)
+          << "only an inline payload may span multiple SGEs";
     }
   }
+
+  void copyInlineSges(const LocalSges& sges);
 
   // address_ can alias the owned inlineData_ buffer (inline WQEs), so a copy or
   // move would leave the target's address_ dangling; Wqes are held only via

@@ -2306,9 +2306,6 @@ int MetaRoceVerbs::postSendWr(
       return EINVAL;
     }
   }
-  static_assert(
-      kMaxSgesPerWorkRequest == 1,
-      "an inline payload is copied from the one sge a work request may post");
   const LocalSges localSges = isInline
       ? makeInlineSourceSges(sges)
       : resolveLocalSges(memoryRegions_, ibvqp.pd, sges);

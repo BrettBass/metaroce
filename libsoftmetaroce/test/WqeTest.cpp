@@ -287,6 +287,43 @@ TEST_F(WqeTest, ANonInlinePayloadIsLeftWhereTheCallerPutIt) {
   }
 }
 
+TEST_F(WqeTest, AnInlinePayloadIsGatheredFromItsSges) {
+  std::array<uint8_t, 3> first{1, 2, 3};
+  std::array<uint8_t, 2> second{4, 5};
+  const LocalSges sges{
+      {.address = first.data(), .length = 3},
+      {.address = second.data(), .length = 2},
+  };
+  const auto payloadOf = [](const Wqe& wqe) {
+    const folly::IOBuf payload =
+        wqe.makeSendPayloadView(0, kInlineMtu, wqe.getMessageSizeBytes());
+    std::vector<uint8_t> bytes;
+    for (const folly::ByteRange range : payload) {
+      bytes.insert(bytes.end(), range.begin(), range.end());
+    }
+    return bytes;
+  };
+  const int flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE;
+  const SendWqe send(kInlineWorkReqId, sges, kInlineMtu, flags);
+  const WriteWithImmWqe write(
+      kInlineWorkReqId,
+      sges,
+      kInlineMtu,
+      kInlineRemoteAddress,
+      kInlineRkey,
+      kInlineImmediateData,
+      flags);
+  first.fill(0);
+  second.fill(0);
+
+  const std::vector<uint8_t> expected{1, 2, 3, 4, 5};
+  EXPECT_EQ(payloadOf(send), expected)
+      << "the bytes are the sges' as posted, in order, not the sources as "
+         "they are now";
+  EXPECT_EQ(payloadOf(write), expected)
+      << "a write takes its inline payload the same way a send does";
+}
+
 TEST_F(WqeTest, AFinalPacketAliasedByTheSumIsRefusedUnderAuditing) {
   gflags::FlagSaver flagSaver;
   gflags::SetCommandLineOption("libsoftmetaroce_audit_posn_state", "true");
