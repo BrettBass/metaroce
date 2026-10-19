@@ -526,8 +526,7 @@ std::unique_ptr<struct EgressPacket> TxFlow::getNextPacketToSendFromWqe(
       txState_.sndUna,
       wqe,
       posn,
-      wqe.sendPayloadAddress(posn, qp_.getMtu()),
-      sendPayloadSize,
+      wqe.makeSendPayloadView(posn, qp_.getMtu(), sendPayloadSize),
       false, // not a retransmission
       false, // not a retransmission by timeout
       rateHints);
@@ -1356,8 +1355,8 @@ uint16_t TxFlow::prepareRetxPacketsIfAny(bool isRtoEvent) {
           txState_.sndUna,
           retxWqe,
           ts.id.posn,
-          retxWqe.sendPayloadAddress(ts.id.posn, qp_.getMtu()),
-          ts.id.sizeBytes,
+          retxWqe.makeSendPayloadView(
+              ts.id.posn, qp_.getMtu(), ts.id.sizeBytes),
           /*isRetransmit=*/true,
           /*isTimeout=*/isRtoEvent,
           retxRateHints));

@@ -28,6 +28,8 @@
 #include <fmt/format.h>
 #include <string_view>
 
+#include <folly/Range.h>
+#include <folly/io/IOBuf.h>
 #include <infiniband/verbs.h>
 
 #include <libsoftmetaroce/Cqe.h>
@@ -150,6 +152,22 @@ struct Wqe {
         workType_ == WorkType::kReadWithImm ||
         workType_ == WorkType::kAtomicFetchAdd ||
         workType_ == WorkType::kAtomicCmpSwp;
+  }
+
+  [[nodiscard]] bool canHaveSendPayload() const {
+    // Read and atomic request frames carry no payload bytes.
+    if (hasRequestFrame()) {
+      return false;
+    }
+
+    // Responder atomic operations put their values in headers.
+    if (workType_ == WorkType::kVirtualAtomicAck ||
+        workType_ == WorkType::kVirtualAtomicExec) {
+      return false;
+    }
+
+    // Other work types may carry payload bytes.
+    return true;
   }
 
   [[nodiscard]] bool posnsAreReceived() const {
@@ -583,26 +601,14 @@ struct Wqe {
     return (void*)((char*)address_ + (mtu * posn));
   }
 
-  // Returns the payload address for transmit, or nullptr for WQE types
-  // with no send payload (read requests, atomic operations) and for
-  // zero-length sends (no bytes to address).
-  const void* sendPayloadAddress(uint16_t posn, uint16_t mtu) {
-    if (sizeBytes_ == 0) {
-      return nullptr;
-    }
-    // NOLINTNEXTLINE(clang-diagnostic-switch-enum)
-    switch (workType_) {
-      case WorkType::kRead:
-      case WorkType::kReadWithImm:
-      case WorkType::kAtomicFetchAdd:
-      case WorkType::kAtomicCmpSwp:
-      case WorkType::kVirtualAtomicAck:
-      case WorkType::kVirtualAtomicExec:
-        return nullptr;
-      default:
-        return addressForPosnMtu(posn, mtu);
-    }
-  }
+  // The referenced payload storage must outlive the returned view.
+  [[nodiscard]] folly::IOBuf makeSendPayloadView(
+      uint32_t posn,
+      uint16_t mtu,
+      uint32_t payloadSizeBytes) const;
+
+  // Copies bytes into the buffer at posn's offset.
+  void deliverPosn(uint32_t posn, uint16_t mtu, folly::ByteRange bytes);
 
  protected:
   explicit Wqe(

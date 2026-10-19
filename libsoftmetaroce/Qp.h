@@ -140,8 +140,7 @@ class Qp {
       uint16_t sndUna,
       const Wqe& wqe,
       uint32_t sndNxtPosn,
-      const void* payloadAddress,
-      uint32_t payloadSizeBytes,
+      const folly::IOBuf& payload,
       bool isRetransmit,
       bool isTimeout,
       uint32_t rateHints = kDefaultRateHintGbps);

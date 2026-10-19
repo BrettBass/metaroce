@@ -221,6 +221,10 @@ class DataPacket : public Packet {
     }
   }
 
+  [[nodiscard]] folly::ByteRange getPayload() const {
+    return {static_cast<const uint8_t*>(payloadAddress_), payloadSizeBytes_};
+  }
+
   [[nodiscard]] const std::optional<uint32_t>& getImmData() const {
     return maybeImmData_;
   }

@@ -32,6 +32,34 @@ bool posnAuditingEnabled() {
   return FLAGS_libsoftmetaroce_audit_posn_state;
 }
 
+folly::IOBuf Wqe::makeSendPayloadView(
+    uint32_t posn,
+    uint16_t mtu,
+    uint32_t payloadSizeBytes) const {
+  if (payloadSizeBytes == 0 || sizeBytes_ == 0 || !canHaveSendPayload()) {
+    return {};
+  }
+  const uint64_t offset = static_cast<uint64_t>(posn) * mtu;
+  CHECK_LE(offset + payloadSizeBytes, sizeBytes_)
+      << "a posn's payload lies within the message it belongs to";
+  CHECK_NE(address_, nullptr)
+      << "a nonempty contiguous payload requires a buffer";
+  return folly::IOBuf::wrapBufferAsValue(
+      static_cast<const char*>(address_) + offset, payloadSizeBytes);
+}
+
+void Wqe::deliverPosn(uint32_t posn, uint16_t mtu, folly::ByteRange bytes) {
+  if (bytes.empty()) {
+    return;
+  }
+  CHECK_LE(bytes.size(), getPosnPayloadSizeBytes(posn, mtu))
+      << "the receiver delivers no more than the posn holds";
+  std::copy(
+      bytes.begin(),
+      bytes.end(),
+      static_cast<uint8_t*>(addressForPosnMtu(posn, mtu)));
+}
+
 std::ostream& operator<<(std::ostream& os, const Wqe::WorkType& workType) {
   os << fmt::format("{}", workType);
   return os;

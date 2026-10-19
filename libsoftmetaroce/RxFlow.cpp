@@ -411,14 +411,14 @@ std::optional<AckHeader> RxFlow::processNewDataPacket(
       wqe = nullptr;
     }
   } else if (wqe && opType != BaseHeader::Opcode::OperationType::READ_IMM_P) {
-    // Copy only the expected payload size; padding bytes are ignored.
     // Read-with-immediate carries no payload, so delivery is skipped.
-    // For zero-length messages the WQE's address may be null, so skip the
-    // address lookup; deliverPayload already no-ops when bytesToCopy is 0.
-    void* destAddr = expectedPayloadSize == 0
-        ? nullptr
-        : wqe->addressForPosnMtu(posn, qp_.getMtu());
-    packet.deliverPayload(destAddr, expectedPayloadSize);
+    const folly::ByteRange payload = packet.getPayload();
+    CHECK_GE(payload.size(), expectedPayloadSize)
+        << "the size check above admits only the expected size, or that plus "
+           "the last posn's alignment padding";
+    const folly::ByteRange unpaddedPayload =
+        payload.subpiece(0, expectedPayloadSize);
+    wqe->deliverPosn(posn, qp_.getMtu(), unpaddedPayload);
   }
 
   rxState_.maxRcvdFsn =

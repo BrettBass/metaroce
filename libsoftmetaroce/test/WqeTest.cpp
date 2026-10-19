@@ -801,7 +801,7 @@ TEST_F(WqeTest, ReadWithImmWqeCarriesImmediateAndActsLikeARead) {
       << "the responder reports this value, so it must arrive intact";
   EXPECT_EQ(wqe.ibvCompletionOpcode(), IBV_WC_RDMA_READ)
       << "the requester reports it as a plain RDMA read";
-  EXPECT_EQ(wqe.sendPayloadAddress(0, mtu), nullptr)
+  EXPECT_TRUE(wqe.makeSendPayloadView(0, mtu, mtu).empty())
       << "a read request carries no send payload, immediate or not";
   EXPECT_EQ(wqe.allocateNextPosn(), Wqe::kRequestFrameWirePosn)
       << "like a plain read it sends one request frame";
@@ -1582,6 +1582,42 @@ TEST_F(WqeTest, AReceiveShortenedToItsLastPacketKeepsTheAuditorInStep) {
   EXPECT_EQ(wqe.getOutstandingPosnCount(), 0u)
       << "the last packet of the shortened message completes it, the posns "
          "past the end having gone with the truncation";
+}
+
+TEST_F(WqeTest, AContiguousSendPayloadIsReferencedInPlaceAtItsOffset) {
+  constexpr uint16_t mtu = 256;
+  std::vector<uint8_t> buffer(600);
+  SendWqe wqe(1, buffer.data(), static_cast<uint32_t>(buffer.size()), mtu);
+  const folly::IOBuf payload = wqe.makeSendPayloadView(2, mtu, 88);
+  EXPECT_EQ(payload.data(), buffer.data() + 2 * mtu)
+      << "the send reads the caller's buffer at the posn's offset, uncopied";
+  EXPECT_EQ(payload.length(), 88u)
+      << "the payload is exactly the size the sender asked for";
+  EXPECT_FALSE(payload.isChained())
+      << "a contiguous buffer yields one buffer per posn";
+}
+
+TEST_F(WqeTest, AContiguousReceiveTakesBytesAtThePosnsOffset) {
+  constexpr uint16_t mtu = 256;
+  std::vector<uint8_t> buffer(600, 0);
+  ReceiveWqe wqe(1, buffer.data(), static_cast<uint32_t>(buffer.size()), mtu);
+  const std::vector<uint8_t> bytes(88, 0xAB);
+  wqe.deliverPosn(2, mtu, folly::ByteRange(bytes.data(), bytes.size()));
+  EXPECT_EQ(std::count(buffer.begin(), buffer.begin() + 2 * mtu, 0), 2 * mtu)
+      << "the posns before this one must be left alone";
+  EXPECT_TRUE(std::equal(bytes.begin(), bytes.end(), buffer.begin() + 2 * mtu))
+      << "the bytes must land at the posn's offset";
+}
+
+TEST_F(WqeTest, AReceiveRefusesBytesPastThePosn) {
+  constexpr uint16_t mtu = 256;
+  std::vector<uint8_t> buffer(512);
+  ReceiveWqe wqe(1, buffer.data(), static_cast<uint32_t>(buffer.size()), mtu);
+  const std::vector<uint8_t> oversize(mtu + 1);
+  EXPECT_DEATH(
+      wqe.deliverPosn(0, mtu, folly::ByteRange(oversize)),
+      "no more than the posn holds")
+      << "the extra byte would land in posn 1, which another packet fills";
 }
 
 } // namespace libsoftmetaroce

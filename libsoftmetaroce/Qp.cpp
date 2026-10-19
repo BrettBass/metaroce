@@ -138,11 +138,15 @@ std::unique_ptr<DataPacket> Qp::buildDataPacket(
     uint16_t sndUna,
     const Wqe& wqe,
     uint32_t sndNxtPosn,
-    const void* payloadAddress,
-    uint32_t payloadSizeBytes,
+    const folly::IOBuf& payload,
     bool isRetransmit,
     bool isTimeout,
     uint32_t rateHints) {
+  CHECK(!payload.isChained())
+      << "this packet builder requires a single-buffer payload";
+  const auto payloadSizeBytes = static_cast<uint32_t>(payload.length());
+  const void* const payloadAddress =
+      payloadSizeBytes == 0 ? nullptr : payload.data();
   const auto operationType = operationTypeFromWqePosn(wqe, sndNxtPosn);
   const BaseHeader::Opcode opcode(operationType);
   const BaseHeader baseHeader = BaseHeader::BaseHeaderBuilder()
