@@ -632,16 +632,6 @@ struct Wqe {
         address_(address),
         sizeBytes_(size),
         maybeImmediateData_(immediateData) {
-    // Virtual WQEs may have a null incoming remote address, and atomics
-    // validate their local buffer at the ack writeback (see RxFlow), not here;
-    // any other nonzero-size WQE must have a non-null address.
-    const bool isAtomicWorkType = workType == WorkType::kAtomicFetchAdd ||
-        workType == WorkType::kAtomicCmpSwp;
-    if (size > 0 && !isVirtual && !isAtomicWorkType) {
-      CHECK_NE(address, nullptr)
-          << "if " << workType << " wqe size is nonzero (" << size
-          << "), address must be non-null";
-    }
     if (isInline && size > 0) {
       inlineData_.assign(
           static_cast<const uint8_t*>(address),

@@ -158,7 +158,8 @@ static struct ibv_qp* setup_qp(
     const enum ibv_mtu& mtu,
     bool sqSigAll = true,
     std::optional<uint8_t> maxRdAtomic = std::nullopt,
-    uint32_t maxWr = 0) {
+    uint32_t maxWr = 0,
+    uint32_t maxInlineData = 0) {
   struct ibv_qp_init_attr qp_init_attr{};
   qp_init_attr.send_cq = cq;
   qp_init_attr.recv_cq = cq;
@@ -167,6 +168,7 @@ static struct ibv_qp* setup_qp(
   qp_init_attr.sq_sig_all = sqSigAll ? 1 : 0;
   qp_init_attr.cap.max_send_wr = maxWr;
   qp_init_attr.cap.max_recv_wr = maxWr;
+  qp_init_attr.cap.max_inline_data = maxInlineData;
   struct ibv_qp* ibvqp = verbs.ibv_create_qp(pd, &qp_init_attr);
 
   struct ibv_qp_attr init_attr{};
@@ -2258,6 +2260,78 @@ TEST_F(VerbsTest, PostRecvOnResetQpReturnsEinval) {
       << "a recv WR rejected in RESET must be reported via bad_wr, not abort";
 
   EXPECT_EQ(verbs_.ibv_destroy_qp(ibvqp), 0);
+}
+
+TEST_F(VerbsTest, ASendFromANullRegisteredBufferCompletesInError) {
+  struct ibv_qp* ibvqp = fixtureQp();
+  ASSERT_NE(ibvqp, nullptr);
+
+  std::array<char, 64> registered{};
+  ibv_mr* mr =
+      verbs_.ibv_reg_mr_internal(pd_, registered.data(), registered.size(), 0);
+  ASSERT_NE(mr, nullptr);
+  ibv_sge sge{.addr = 0, .length = 64, .lkey = mr->lkey};
+  struct ibv_send_wr send_wr{
+      .wr_id = 9,
+      .sg_list = &sge,
+      .num_sge = 1,
+      .opcode = IBV_WR_SEND,
+      .send_flags = IBV_SEND_SIGNALED,
+  };
+  struct ibv_send_wr* bad_wr = nullptr;
+  ASSERT_EQ(verbs_.ibv_post_send(ibvqp, &send_wr, &bad_wr), 0)
+      << "a null non-inline source must be reported through a completion";
+
+  struct ibv_wc wc{};
+  ASSERT_TRUE(pollOneCompletion(verbs_, cq_, wc))
+      << "the local protection error must surface as a completion";
+  EXPECT_EQ(wc.status, IBV_WC_LOC_PROT_ERR)
+      << "no registered region holds address zero";
+  EXPECT_EQ(wc.wr_id, 9) << "the completion must report the originating wr_id";
+
+  EXPECT_EQ(verbs_.ibv_destroy_qp(std::exchange(qp_, nullptr)), 0);
+  EXPECT_EQ(verbs_.ibv_dereg_mr(mr), 0);
+}
+
+TEST_F(VerbsTest, AnInlineSendFromANullBufferIsRefused) {
+  qp_ = setup_qp(
+      verbs_,
+      cq_,
+      pd_,
+      folly::IPAddressV6("fc00::1"),
+      kDestQpNum,
+      IBV_MTU_2048,
+      /*sqSigAll=*/true,
+      /*maxRdAtomic=*/std::nullopt,
+      /*maxWr=*/0,
+      /*maxInlineData=*/64);
+  ASSERT_NE(qp_, nullptr);
+
+  ibv_sge sge{.addr = 0, .length = 16};
+  struct ibv_send_wr send_wr{
+      .wr_id = 1,
+      .sg_list = &sge,
+      .num_sge = 1,
+      .opcode = IBV_WR_SEND,
+      .send_flags = IBV_SEND_SIGNALED | IBV_SEND_INLINE,
+  };
+  struct ibv_send_wr* bad_wr = nullptr;
+  EXPECT_EQ(verbs_.ibv_post_send(qp_, &send_wr, &bad_wr), EINVAL)
+      << "inline posting must reject a null source before copying";
+  EXPECT_EQ(bad_wr, &send_wr) << "a rejected WR must be reported via bad_wr";
+}
+
+TEST_F(VerbsTest, AReceiveIntoANullBufferIsPostedForLazyValidation) {
+  struct ibv_qp* ibvqp = fixtureQp();
+  ASSERT_NE(ibvqp, nullptr);
+
+  ibv_sge sge{.addr = 0, .length = 64};
+  struct ibv_recv_wr rcv_wr{.wr_id = 1, .sg_list = &sge, .num_sge = 1};
+  struct ibv_recv_wr* bad_wr = nullptr;
+  EXPECT_EQ(verbs_.ibv_post_recv(ibvqp, &rcv_wr, &bad_wr), 0)
+      << "receive-buffer validation is deferred until data arrives";
+  EXPECT_EQ(bad_wr, nullptr)
+      << "no bad_wr should be reported on a successful post";
 }
 
 /*

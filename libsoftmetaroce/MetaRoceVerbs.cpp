@@ -2291,7 +2291,18 @@ int MetaRoceVerbs::postSendWr(
     if (!inlineOpcodeOk || length > maxInlineData) {
       return EINVAL;
     }
+    // Reject a null source before copying a nonempty inline payload.
+    const bool hasNullInlineSource =
+        std::ranges::any_of(sges, [](const struct ibv_sge& sge) {
+          return sge.length != 0 && sge.addr == 0;
+        });
+    if (hasNullInlineSource) {
+      return EINVAL;
+    }
   }
+  static_assert(
+      kMaxSgesPerWorkRequest == 1,
+      "an inline payload is copied from the one sge a work request may post");
   const LocalSges localSges =
       isInline ? LocalSges{} : resolveLocalSges(memoryRegions_, ibvqp.pd, sges);
   void* const addr = isInline
