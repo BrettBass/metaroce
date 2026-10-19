@@ -36,6 +36,7 @@
 #include <libsoftmetaroce/QpState.h>
 #include <libsoftmetaroce/RenamedFlag.h>
 #include <libsoftmetaroce/SequenceNumbers.h>
+#include <libsoftmetaroce/SgeList.h>
 #include <libsoftmetaroce/WireProfiles.h>
 #include <libsoftmetaroce/congestion_control/Flags.h>
 #include <libsoftmetaroce/modifier/CorruptModifier.h>
@@ -59,6 +60,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <type_traits>
 #include <utility>
@@ -1463,8 +1465,7 @@ int MetaRoceVerbs::ibv_post_srq_recv(
       return withErrno(EINVAL);
     }
     static_assert(
-        kMaxSgesPerWorkRequest == 1,
-        "SharedReceive holds one scatter-gather entry");
+        kMaxSrqSges == 1, "SharedReceive holds one scatter-gather entry");
     SharedReceive receive{.workRequestId = wr->wr_id};
     if (wr->num_sge == 1) {
       const struct ibv_sge& sge = *CHECK_NOTNULL(sgList);
@@ -2224,6 +2225,28 @@ void MetaRoceVerbs::tearDownQp(std::unique_ptr<Qp> qp) {
   }
 }
 
+namespace {
+
+// Drops zero-length SGEs, which require no local memory validation.
+LocalSges resolveLocalSges(
+    const MemoryRegions& memoryRegions,
+    const ibv_pd* pd,
+    std::span<const ibv_sge> sges) {
+  LocalSges result;
+  for (const ibv_sge& sge : sges) {
+    if (sge.length != 0) {
+      result.push_back({
+          .address = memoryRegions.localAddressOf(pd, sge.addr, sge.lkey),
+          .length = sge.length,
+          .lkey = sge.lkey,
+      });
+    }
+  }
+  return result;
+}
+
+} // namespace
+
 std::pair<void* FOLLY_NULLABLE, uint32_t>
 MetaRoceVerbs::addressAndLengthFromSge(const struct ibv_sge* singleSge) {
   if (singleSge != nullptr) {
@@ -2243,20 +2266,15 @@ int MetaRoceVerbs::postSendWr(
   if (state != IBV_QPS_RTS && state != IBV_QPS_ERR) {
     return EINVAL;
   }
-  if (wr.num_sge < 0 || wr.num_sge > 1 ||
-      (wr.num_sge == 1 && wr.sg_list == nullptr)) {
+  const std::optional<ValidatedSgeList> sgeList =
+      validatedSgeList(wr.sg_list, wr.num_sge);
+  if (!sgeList) {
     return EINVAL;
   }
-  const struct ibv_sge* singleSge = wr.num_sge == 1 ? wr.sg_list : nullptr;
-  const auto [sgeAddr, length] = addressAndLengthFromSge(singleSge);
-  const uint32_t lkey = singleSge != nullptr ? singleSge->lkey : 0;
+  const std::span<const struct ibv_sge> sges = sgeList->sges;
+  const uint32_t length = sgeList->totalLength;
+  const uint32_t lkey = sges.empty() ? 0 : sges.front().lkey;
   const bool isInline = wr.send_flags & IBV_SEND_INLINE;
-  // An inline payload is copied from the caller's pointer; any other buffer is
-  // addressed through the region its lkey identifies.
-  void* const addr = isInline
-      ? sgeAddr
-      : memoryRegions_.localAddressOf(
-            ibvqp.pd, singleSge != nullptr ? singleSge->addr : 0, lkey);
   if (isInline) {
     // Inline data is copied into the WQE, so it applies only to operations that
     // carry a send payload and must fit the cap this Tag was granted; any
@@ -2274,6 +2292,11 @@ int MetaRoceVerbs::postSendWr(
       return EINVAL;
     }
   }
+  const LocalSges localSges =
+      isInline ? LocalSges{} : resolveLocalSges(memoryRegions_, ibvqp.pd, sges);
+  void* const addr = isInline
+      ? addressAndLengthFromSge(sges.empty() ? nullptr : sges.data()).first
+      : (localSges.empty() ? nullptr : localSges.front().address);
 
   const bool isReadWithImm = wr.opcode == IBV_WR_DRIVER1;
   const bool isRead = wr.opcode == IBV_WR_RDMA_READ;
@@ -2282,9 +2305,13 @@ int MetaRoceVerbs::postSendWr(
   const bool permitsZeroLength = wr.opcode == IBV_WR_RDMA_WRITE_WITH_IMM ||
       wr.opcode == IBV_WR_SEND || wr.opcode == IBV_WR_SEND_WITH_IMM || isRead ||
       isReadWithImm;
-  if (!permitsZeroLength && wr.num_sge != 1) {
+  if (isAtomic && sges.size() != 1) {
+    LOG(ERROR) << "opcode " << wr.opcode << " requires exactly one sge";
+    return EINVAL;
+  }
+  if (!permitsZeroLength && sges.empty()) {
     LOG(ERROR) << "opcode " << wr.opcode
-               << " requires one sge with data; an empty sge list is only "
+               << " requires an sge with data; an empty sge list is only "
                << "permitted for RDMA_WRITE_WITH_IMM and zero-length SEND / "
                << "SEND_WITH_IMM / RDMA_READ";
     return EINVAL;
@@ -2317,8 +2344,7 @@ int MetaRoceVerbs::postSendWr(
       !isAtomic && !isInline && !isRead && !isReadWithImm;
   // A send reads the local buffer, which needs no registered permission.
   if (wrNeedsValidSge &&
-      !memoryRegions_.isValidLocal(
-          ibvqp.pd, static_cast<char*>(addr), length, lkey, 0)) {
+      !memoryRegions_.isValidLocal(ibvqp.pd, localSges, length, 0)) {
     LOG(ERROR)
         << "post_send with an unregistered local address; completing with "
            "local protection error";
@@ -2364,11 +2390,6 @@ int MetaRoceVerbs::postSendWr(
         wr.imm_data,
         wr.send_flags);
   } else if (wr.opcode == IBV_WR_RDMA_READ) {
-    DCHECK(wr.num_sge == 1 || length == 0)
-        << "num_sge above 1 is rejected with EINVAL earlier in this function, "
-           "so a read reaching here without an sge has nowhere to scatter and "
-           "must be zero-length. got length "
-        << length;
     wqe = std::make_unique<ReadWriteWqe>(
         Wqe::WorkType::kRead,
         wr.wr_id,
@@ -2380,11 +2401,6 @@ int MetaRoceVerbs::postSendWr(
         wr.send_flags,
         lkey);
   } else if (isReadWithImm) {
-    DCHECK(wr.num_sge == 1 || length == 0)
-        << "num_sge above 1 is rejected with EINVAL earlier in this function, "
-           "so a read reaching here without an sge has nowhere to scatter and "
-           "must be zero-length. got length "
-        << length;
     wqe = std::make_unique<ReadWithImmWqe>(
         wr.wr_id,
         addr,
@@ -2396,7 +2412,7 @@ int MetaRoceVerbs::postSendWr(
         wr.send_flags,
         lkey);
   } else if (isAtomic) {
-    CHECK_EQ(wr.num_sge, 1)
+    CHECK_EQ(sges.size(), 1u)
         << "an atomic with 0 or >1 sge is rejected before this point, so "
            "sg_list must be a single valid entry to read its lkey";
     const bool isFetchAdd = (wr.opcode == IBV_WR_ATOMIC_FETCH_AND_ADD);
@@ -2486,30 +2502,28 @@ int MetaRoceVerbs::postRecvWr(
     struct ibv_qp& ibvqp,
     Qp& qp,
     const struct ibv_recv_wr& wr) {
-  if (wr.num_sge < 0 || wr.num_sge > 1 ||
-      (wr.num_sge == 1 && wr.sg_list == nullptr)) {
+  const std::optional<ValidatedSgeList> sgeList =
+      validatedSgeList(wr.sg_list, wr.num_sge);
+  if (!sgeList) {
     return EINVAL;
   }
-  const struct ibv_sge* singleSge = wr.num_sge == 1 ? wr.sg_list : nullptr;
   if (loadQpState(ibvqp) == IBV_QPS_RESET) {
     return EINVAL;
   }
 
-  // Read the SGE directly: a receive needs its lkey kept for the WQE, and the
-  // buffer is validated lazily at data arrival (RxFlow) rather than here.
-  void* addr = nullptr;
-  uint32_t length = 0;
-  uint32_t lkey = 0;
-  if (singleSge != nullptr) {
-    const struct ibv_sge& sge = *singleSge;
-    addr = memoryRegions_.localAddressOf(ibvqp.pd, sge.addr, sge.lkey);
-    length = sge.length;
-    lkey = sge.lkey;
-  }
+  // Each sge keeps its lkey, for validating the buffer when data arrives.
+  const LocalSges localSges =
+      resolveLocalSges(memoryRegions_, ibvqp.pd, sgeList->sges);
+  const uint32_t lkey = localSges.empty() ? 0 : localSges.front().lkey;
   auto tagNum = qpAndTagToTag(ibvqp.qp_num);
   const bool accepted = qp.postWqe(
       tagNum,
-      std::make_unique<ReceiveWqe>(wr.wr_id, addr, length, qp.getMtu(), lkey));
+      std::make_unique<ReceiveWqe>(
+          wr.wr_id,
+          localSges.empty() ? nullptr : localSges.front().address,
+          sgeList->totalLength,
+          qp.getMtu(),
+          lkey));
 
   if (!accepted) {
     LOG_FIRST_N(WARNING, 10)

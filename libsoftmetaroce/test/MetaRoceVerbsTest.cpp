@@ -54,6 +54,7 @@
 #include <string>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 using namespace testing;
@@ -1869,21 +1870,15 @@ TEST_F(VerbsTest, PostZeroLengthSendWithNoSgeIsAccepted) {
       << "no bad_wr should be reported on a successful post";
 }
 
-/*
- * Posting a multi-SGE WR must reject gracefully, not abort. lsmr supports only
- * a single SGE and rejects a longer list; some implementations gather multiple
- * SGEs instead, so this takes the rejection as a precondition and verifies it
- * is reported via bad_wr with the process intact.
- */
-TEST_F(VerbsTest, PostSendWithMultipleSgesDoesNotAbort) {
+TEST_F(VerbsTest, PostSendWithMoreSgesThanTheDeviceReportsIsRefused) {
   struct ibv_qp* ibvqp = fixtureQp();
   ASSERT_NE(ibvqp, nullptr);
 
-  ibv_sge sges[2] = {};
+  std::array<ibv_sge, kMaxSgesPerWorkRequest + 1> sges{};
   struct ibv_send_wr send_wr{
       .wr_id = 1,
-      .sg_list = sges,
-      .num_sge = 2,
+      .sg_list = sges.data(),
+      .num_sge = static_cast<int>(sges.size()),
       .opcode = IBV_WR_SEND,
       .send_flags = IBV_SEND_SIGNALED,
   };
@@ -1894,6 +1889,39 @@ TEST_F(VerbsTest, PostSendWithMultipleSgesDoesNotAbort) {
          "from the return";
   EXPECT_EQ(bad_wr, &send_wr)
       << "a rejected WR must be reported via bad_wr, not abort the process";
+}
+
+TEST_F(VerbsTest, PostSendWithEverySgeTheDeviceReportsIsAccepted) {
+  struct ibv_qp* ibvqp = fixtureQp();
+  ASSERT_NE(ibvqp, nullptr);
+
+  std::array<char, 64 * kMaxSgesPerWorkRequest> buffer{};
+  ibv_mr* mr = verbs_.ibv_reg_mr_internal(pd_, buffer.data(), buffer.size(), 0);
+  ASSERT_NE(mr, nullptr);
+  std::array<ibv_sge, kMaxSgesPerWorkRequest> sges{};
+  for (size_t i = 0; i < sges.size(); ++i) {
+    sges[i] = {
+        .addr = reinterpret_cast<uint64_t>(buffer.data() + 64 * i),
+        .length = 64,
+        .lkey = mr->lkey,
+    };
+  }
+  struct ibv_send_wr send_wr{
+      .wr_id = 1,
+      .sg_list = sges.data(),
+      .num_sge = static_cast<int>(sges.size()),
+      .opcode = IBV_WR_SEND,
+      .send_flags = IBV_SEND_SIGNALED,
+  };
+  struct ibv_send_wr* bad_wr = nullptr;
+  EXPECT_EQ(verbs_.ibv_post_send(ibvqp, &send_wr, &bad_wr), 0)
+      << "ibv_query_device advertises this many sges, so a WR using them all "
+         "must be accepted";
+  EXPECT_EQ(bad_wr, nullptr)
+      << "no bad_wr should be reported on a successful post";
+
+  EXPECT_EQ(verbs_.ibv_destroy_qp(std::exchange(qp_, nullptr)), 0);
+  EXPECT_EQ(verbs_.ibv_dereg_mr(mr), 0);
 }
 
 TEST_F(VerbsTest, PostSendWithNullSgListReturnsEinval) {
@@ -1946,8 +1974,8 @@ TEST_F(VerbsTest, AChainedSendStopsAtTheWorkRequestItRefuses) {
   };
   struct ibv_send_wr* bad_wr = nullptr;
   EXPECT_EQ(verbs_.ibv_post_send(ibvqp, &first, &bad_wr), EINVAL)
-      << "the second work request asks for two scatter-gather entries, which "
-         "lsmr refuses";
+      << "the second work request asks for two scatter-gather entries without "
+         "a list to hold them";
   EXPECT_EQ(bad_wr, &refused)
       << "bad_wr tells the caller which work request was not posted, so it "
          "knows the ones ahead of it were";
@@ -2160,8 +2188,8 @@ TEST_F(VerbsTest, AChainedRecvPostsEachWorkRequestAheadOfTheOneItRefuses) {
   };
   struct ibv_recv_wr* bad_wr = nullptr;
   EXPECT_EQ(verbs_.ibv_post_recv(ibvqp, &first, &bad_wr), EINVAL)
-      << "the second work request asks for two scatter-gather entries, which "
-         "lsmr refuses";
+      << "the second work request asks for two scatter-gather entries without "
+         "a list to hold them";
   EXPECT_EQ(bad_wr, &refused)
       << "bad_wr tells the caller which work request was not posted";
 
@@ -2172,19 +2200,15 @@ TEST_F(VerbsTest, AChainedRecvPostsEachWorkRequestAheadOfTheOneItRefuses) {
          "counting on it meets a receiver not ready";
 }
 
-/*
- * ibv_post_recv rejects a multi-SGE WR gracefully; lsmr gathers at most one SGE
- * per WR.
- */
-TEST_F(VerbsTest, PostRecvWithMultipleSgesReturnsEinval) {
+TEST_F(VerbsTest, PostRecvWithMoreSgesThanTheDeviceReportsIsRefused) {
   struct ibv_qp* ibvqp = fixtureQp();
   ASSERT_NE(ibvqp, nullptr);
 
-  ibv_sge sges[2] = {};
+  std::array<ibv_sge, kMaxSgesPerWorkRequest + 1> sges{};
   struct ibv_recv_wr rcv_wr{
       .wr_id = 1,
-      .sg_list = sges,
-      .num_sge = 2,
+      .sg_list = sges.data(),
+      .num_sge = static_cast<int>(sges.size()),
   };
   struct ibv_recv_wr* bad_wr = nullptr;
   EXPECT_EQ(verbs_.ibv_post_recv(ibvqp, &rcv_wr, &bad_wr), EINVAL)
@@ -3873,8 +3897,7 @@ TEST_F(VerbsTest, ARefusedPostLeavesItsCodeInErrno) {
   struct ibv_send_wr* badSendWr = nullptr;
   errno = 0;
   EXPECT_EQ(verbs_.ibv_post_send(ibvqp, &malformedSend, &badSendWr), EINVAL)
-      << "ibv_post_send must refuse two scatter-gather entries, which lsmr "
-         "does not carry";
+      << "ibv_post_send must refuse two scatter-gather entries with no list";
   EXPECT_EQ(errno, EINVAL)
       << "and must leave that code in errno, or a caller reading it after the "
          "refusal sees what an earlier, unrelated call left behind";
