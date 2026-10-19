@@ -942,6 +942,8 @@ int MetaRoceVerbs::ibv_query_port(
   port_attr->max_mtu = IBV_MTU_8192;
   port_attr->active_mtu = IBV_MTU_8192;
   port_attr->link_layer = IBV_LINK_LAYER_ETHERNET;
+  // Fixed verbs width; the GID count always fits.
+  // NOLINTNEXTLINE(clang-diagnostic-shorten-64-to-32)
   port_attr->gid_tbl_len = gid_table_.size();
   return 0;
 }
@@ -2091,7 +2093,8 @@ struct ibv_qp* FOLLY_NULLABLE MetaRoceVerbs::ibv_create_qp_ex(
     return nullSettingErrno(ENOMEM);
   }
   auto freeIbvQp = folly::makeGuard([ibvQp] { free(ibvQp); });
-  *ibvQp = {
+  struct ibv_qp& addedQp = *ibvQp;
+  addedQp = {
       .context = context,
       .qp_context = qp_init_attr->qp_context,
       .pd = parentPd,
@@ -2111,7 +2114,7 @@ struct ibv_qp* FOLLY_NULLABLE MetaRoceVerbs::ibv_create_qp_ex(
         tagNum,
         sendCq,
         recvCq,
-        ibvQp,
+        &addedQp,
         qp_init_attr->sq_sig_all != 0,
         qp_init_attr->cap.max_inline_data,
         sendQueueDepth,
@@ -2135,8 +2138,8 @@ struct ibv_qp* FOLLY_NULLABLE MetaRoceVerbs::ibv_create_qp_ex(
   freeIbvQp.dismiss();
   releaseSharedReceiveQueue.dismiss();
   containLogFailure([&] {
-    LOG(INFO) << "Added Tag: " << (uint32_t)qpAndTagToTag(ibvQp->qp_num)
-              << " to QP: " << qpAndTagToQp(ibvQp->qp_num);
+    LOG(INFO) << "Added Tag: " << (uint32_t)qpAndTagToTag(addedQp.qp_num)
+              << " to QP: " << qpAndTagToQp(addedQp.qp_num);
   });
   publishTagConfig(
       {.localQpNum = qpNum,
@@ -2146,7 +2149,7 @@ struct ibv_qp* FOLLY_NULLABLE MetaRoceVerbs::ibv_create_qp_ex(
        .sendMsn = addedTag->getNextMsn()});
   qp_init_attr->cap.max_send_wr = sendQueueDepth;
   qp_init_attr->cap.max_recv_wr = receiveQueueDepth;
-  return ibvQp;
+  return &addedQp;
 }
 
 int MetaRoceVerbs::ibv_destroy_qp(struct ibv_qp* qp) {

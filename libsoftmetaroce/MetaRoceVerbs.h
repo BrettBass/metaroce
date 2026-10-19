@@ -271,10 +271,11 @@ class MetaRoceVerbs : public RdmaVerbs, public folly::NonCopyableNonMovable {
     // This ensures all GIDs share the same thread for thread-safe
     // processing of packets that may belong to the same QP across flows.
     if (!receivers_.empty()) {
-      auto& primaryReceiver = receivers_.begin()->second;
+      Receiver& primaryReceiver =
+          *CHECK_NOTNULL(receivers_.begin()->second.get());
       LOG(INFO) << "Adding receiver address " << receiverAddr
                 << " to existing receiver";
-      primaryReceiver->addLocalAddress(
+      primaryReceiver.addLocalAddress(
           receiverAddr, socketMaker_, metaRoceBindToPort_, entry);
     } else {
       LOG(INFO) << "Creating receiver on " << receiverAddr;
@@ -297,7 +298,9 @@ class MetaRoceVerbs : public RdmaVerbs, public folly::NonCopyableNonMovable {
       // tolerable here; any other failure is the caller's to see.
       try {
         if (!alternateReceivers_.empty()) {
-          alternateReceivers_.begin()->second->addLocalAddress(
+          Receiver& alternateReceiver =
+              *CHECK_NOTNULL(alternateReceivers_.begin()->second.get());
+          alternateReceiver.addLocalAddress(
               receiverAddr, socketMaker_, kMetaRoceBindToPortAlternate, entry);
         } else {
           auto alternateReceiver = std::make_unique<Receiver>(
