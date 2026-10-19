@@ -2234,38 +2234,38 @@ MetaRoceVerbs::addressAndLengthFromSge(const struct ibv_sge* singleSge) {
 }
 
 int MetaRoceVerbs::postSendWr(
-    struct ibv_qp* ibvqp,
+    struct ibv_qp& ibvqp,
     Qp& qp,
-    const struct ibv_send_wr* wr) {
+    const struct ibv_send_wr& wr) {
   // An errored QP flushes a WR rather than diagnosing it, so this precedes the
   // local-buffer validation below.
-  const ibv_qp_state state = loadQpState(*ibvqp);
+  const ibv_qp_state state = loadQpState(ibvqp);
   if (state != IBV_QPS_RTS && state != IBV_QPS_ERR) {
     return EINVAL;
   }
-  if (wr->num_sge < 0 || wr->num_sge > 1 ||
-      (wr->num_sge == 1 && wr->sg_list == nullptr)) {
+  if (wr.num_sge < 0 || wr.num_sge > 1 ||
+      (wr.num_sge == 1 && wr.sg_list == nullptr)) {
     return EINVAL;
   }
-  const struct ibv_sge* singleSge = wr->num_sge == 1 ? wr->sg_list : nullptr;
+  const struct ibv_sge* singleSge = wr.num_sge == 1 ? wr.sg_list : nullptr;
   const auto [sgeAddr, length] = addressAndLengthFromSge(singleSge);
   const uint32_t lkey = singleSge != nullptr ? singleSge->lkey : 0;
-  const bool isInline = wr->send_flags & IBV_SEND_INLINE;
+  const bool isInline = wr.send_flags & IBV_SEND_INLINE;
   // An inline payload is copied from the caller's pointer; any other buffer is
   // addressed through the region its lkey identifies.
   void* const addr = isInline
       ? sgeAddr
       : memoryRegions_.localAddressOf(
-            ibvqp->pd, singleSge != nullptr ? singleSge->addr : 0, lkey);
+            ibvqp.pd, singleSge != nullptr ? singleSge->addr : 0, lkey);
   if (isInline) {
     // Inline data is copied into the WQE, so it applies only to operations that
     // carry a send payload and must fit the cap this Tag was granted; any
     // other opcode, or a payload over that cap, is a posting error.
-    const bool inlineOpcodeOk = wr->opcode == IBV_WR_SEND ||
-        wr->opcode == IBV_WR_SEND_WITH_IMM || wr->opcode == IBV_WR_RDMA_WRITE ||
-        wr->opcode == IBV_WR_RDMA_WRITE_WITH_IMM;
+    const bool inlineOpcodeOk = wr.opcode == IBV_WR_SEND ||
+        wr.opcode == IBV_WR_SEND_WITH_IMM || wr.opcode == IBV_WR_RDMA_WRITE ||
+        wr.opcode == IBV_WR_RDMA_WRITE_WITH_IMM;
     const std::shared_ptr<const Tag> tag =
-        qp.getTag(qpAndTagToTag(ibvqp->qp_num));
+        qp.getTag(qpAndTagToTag(ibvqp.qp_num));
     if (tag == nullptr) {
       return EINVAL;
     }
@@ -2275,15 +2275,15 @@ int MetaRoceVerbs::postSendWr(
     }
   }
 
-  const bool isReadWithImm = wr->opcode == IBV_WR_DRIVER1;
-  const bool isRead = wr->opcode == IBV_WR_RDMA_READ;
-  const bool isAtomic = wr->opcode == IBV_WR_ATOMIC_FETCH_AND_ADD ||
-      wr->opcode == IBV_WR_ATOMIC_CMP_AND_SWP;
-  const bool permitsZeroLength = wr->opcode == IBV_WR_RDMA_WRITE_WITH_IMM ||
-      wr->opcode == IBV_WR_SEND || wr->opcode == IBV_WR_SEND_WITH_IMM ||
-      isRead || isReadWithImm;
-  if (!permitsZeroLength && wr->num_sge != 1) {
-    LOG(ERROR) << "opcode " << wr->opcode
+  const bool isReadWithImm = wr.opcode == IBV_WR_DRIVER1;
+  const bool isRead = wr.opcode == IBV_WR_RDMA_READ;
+  const bool isAtomic = wr.opcode == IBV_WR_ATOMIC_FETCH_AND_ADD ||
+      wr.opcode == IBV_WR_ATOMIC_CMP_AND_SWP;
+  const bool permitsZeroLength = wr.opcode == IBV_WR_RDMA_WRITE_WITH_IMM ||
+      wr.opcode == IBV_WR_SEND || wr.opcode == IBV_WR_SEND_WITH_IMM || isRead ||
+      isReadWithImm;
+  if (!permitsZeroLength && wr.num_sge != 1) {
+    LOG(ERROR) << "opcode " << wr.opcode
                << " requires one sge with data; an empty sge list is only "
                << "permitted for RDMA_WRITE_WITH_IMM and zero-length SEND / "
                << "SEND_WITH_IMM / RDMA_READ";
@@ -2293,7 +2293,7 @@ int MetaRoceVerbs::postSendWr(
   const bool countsTowardMaxRdAtomic = isAtomic || isRead || isReadWithImm;
   if (countsTowardMaxRdAtomic) {
     const std::shared_ptr<const Tag> tag =
-        qp.getTag(qpAndTagToTag(ibvqp->qp_num));
+        qp.getTag(qpAndTagToTag(ibvqp.qp_num));
     if (tag == nullptr) {
       return EINVAL;
     }
@@ -2318,7 +2318,7 @@ int MetaRoceVerbs::postSendWr(
   // A send reads the local buffer, which needs no registered permission.
   if (wrNeedsValidSge &&
       !memoryRegions_.isValidLocal(
-          ibvqp->pd, static_cast<char*>(addr), length, lkey, 0)) {
+          ibvqp.pd, static_cast<char*>(addr), length, lkey, 0)) {
     LOG(ERROR)
         << "post_send with an unregistered local address; completing with "
            "local protection error";
@@ -2328,78 +2328,78 @@ int MetaRoceVerbs::postSendWr(
   // A payload-carrying opcode with a zero-length buffer is rejected gracefully
   // (atomics validate their own operand size below).
   if (!postError && !isAtomic && !permitsZeroLength && length == 0) {
-    LOG(ERROR) << "opcode " << wr->opcode
+    LOG(ERROR) << "opcode " << wr.opcode
                << " requires a non-empty local buffer";
     return EINVAL;
   }
-  uint8_t tagNum = qpAndTagToTag(ibvqp->qp_num);
+  uint8_t tagNum = qpAndTagToTag(ibvqp.qp_num);
 
   // Built here and posted once below, so a WR that failed local validation
   // still occupies its MSN and completes in order.
   std::unique_ptr<Wqe> wqe;
-  if (wr->opcode == IBV_WR_SEND) {
+  if (wr.opcode == IBV_WR_SEND) {
     wqe = std::make_unique<SendWqe>(
-        wr->wr_id, addr, length, qp.getMtu(), wr->send_flags);
-  } else if (wr->opcode == IBV_WR_SEND_WITH_IMM) {
+        wr.wr_id, addr, length, qp.getMtu(), wr.send_flags);
+  } else if (wr.opcode == IBV_WR_SEND_WITH_IMM) {
     wqe = std::make_unique<SendWithImmWqe>(
-        wr->wr_id, addr, length, qp.getMtu(), wr->imm_data, wr->send_flags);
-  } else if (wr->opcode == IBV_WR_RDMA_WRITE) {
+        wr.wr_id, addr, length, qp.getMtu(), wr.imm_data, wr.send_flags);
+  } else if (wr.opcode == IBV_WR_RDMA_WRITE) {
     wqe = std::make_unique<ReadWriteWqe>(
         Wqe::WorkType::kWrite,
-        wr->wr_id,
+        wr.wr_id,
         addr,
         length,
         qp.getMtu(),
-        wr->wr.rdma.remote_addr,
-        wr->wr.rdma.rkey,
-        wr->send_flags);
-  } else if (wr->opcode == IBV_WR_RDMA_WRITE_WITH_IMM) {
+        wr.wr.rdma.remote_addr,
+        wr.wr.rdma.rkey,
+        wr.send_flags);
+  } else if (wr.opcode == IBV_WR_RDMA_WRITE_WITH_IMM) {
     wqe = std::make_unique<WriteWithImmWqe>(
-        wr->wr_id,
+        wr.wr_id,
         addr,
         length,
         qp.getMtu(),
-        wr->wr.rdma.remote_addr,
-        wr->wr.rdma.rkey,
-        wr->imm_data,
-        wr->send_flags);
-  } else if (wr->opcode == IBV_WR_RDMA_READ) {
-    DCHECK(wr->num_sge == 1 || length == 0)
+        wr.wr.rdma.remote_addr,
+        wr.wr.rdma.rkey,
+        wr.imm_data,
+        wr.send_flags);
+  } else if (wr.opcode == IBV_WR_RDMA_READ) {
+    DCHECK(wr.num_sge == 1 || length == 0)
         << "num_sge above 1 is rejected with EINVAL earlier in this function, "
            "so a read reaching here without an sge has nowhere to scatter and "
            "must be zero-length. got length "
         << length;
     wqe = std::make_unique<ReadWriteWqe>(
         Wqe::WorkType::kRead,
-        wr->wr_id,
+        wr.wr_id,
         addr,
         length,
         qp.getMtu(),
-        wr->wr.rdma.remote_addr,
-        wr->wr.rdma.rkey,
-        wr->send_flags,
+        wr.wr.rdma.remote_addr,
+        wr.wr.rdma.rkey,
+        wr.send_flags,
         lkey);
   } else if (isReadWithImm) {
-    DCHECK(wr->num_sge == 1 || length == 0)
+    DCHECK(wr.num_sge == 1 || length == 0)
         << "num_sge above 1 is rejected with EINVAL earlier in this function, "
            "so a read reaching here without an sge has nowhere to scatter and "
            "must be zero-length. got length "
         << length;
     wqe = std::make_unique<ReadWithImmWqe>(
-        wr->wr_id,
+        wr.wr_id,
         addr,
         length,
         qp.getMtu(),
-        wr->wr.rdma.remote_addr,
-        wr->wr.rdma.rkey,
-        wr->imm_data,
-        wr->send_flags,
+        wr.wr.rdma.remote_addr,
+        wr.wr.rdma.rkey,
+        wr.imm_data,
+        wr.send_flags,
         lkey);
   } else if (isAtomic) {
-    CHECK_EQ(wr->num_sge, 1)
+    CHECK_EQ(wr.num_sge, 1)
         << "an atomic with 0 or >1 sge is rejected before this point, so "
            "sg_list must be a single valid entry to read its lkey";
-    const bool isFetchAdd = (wr->opcode == IBV_WR_ATOMIC_FETCH_AND_ADD);
+    const bool isFetchAdd = (wr.opcode == IBV_WR_ATOMIC_FETCH_AND_ADD);
     if (length != kAtomicOperationSizeBytes) {
       // The operand size is a local property, so a wrong size is a local length
       // error on the send CQ. The rejected length reaches no further: AtomicWqe
@@ -2413,22 +2413,22 @@ int MetaRoceVerbs::postSendWr(
     auto workType = isFetchAdd ? Wqe::WorkType::kAtomicFetchAdd
                                : Wqe::WorkType::kAtomicCmpSwp;
     uint64_t swapOrAddData =
-        isFetchAdd ? wr->wr.atomic.compare_add : wr->wr.atomic.swap;
-    uint64_t compareData = isFetchAdd ? 0 : wr->wr.atomic.compare_add;
+        isFetchAdd ? wr.wr.atomic.compare_add : wr.wr.atomic.swap;
+    uint64_t compareData = isFetchAdd ? 0 : wr.wr.atomic.compare_add;
     wqe = std::make_unique<AtomicWqe>(
         workType,
-        wr->wr_id,
+        wr.wr_id,
         addr,
         qp.getMtu(),
-        wr->wr.atomic.remote_addr,
-        wr->wr.atomic.rkey,
+        wr.wr.atomic.remote_addr,
+        wr.wr.atomic.rkey,
         swapOrAddData,
         compareData,
-        wr->send_flags,
+        wr.send_flags,
         lkey);
   } else {
     LOG(ERROR) << "MetaRoceVerbs does not support post_send opcode "
-               << (int)wr->opcode;
+               << (int)wr.opcode;
     return EINVAL;
   }
 
@@ -2439,7 +2439,7 @@ int MetaRoceVerbs::postSendWr(
   }
   if (!qp.postWqe(tagNum, std::move(wqe))) {
     LOG_FIRST_N(WARNING, 10)
-        << "post_send past max_qp_wr on qp: " << ibvqp->qp_num;
+        << "post_send past max_qp_wr on qp: " << ibvqp.qp_num;
     return ENOMEM;
   }
 
@@ -2473,7 +2473,7 @@ int MetaRoceVerbs::ibv_post_send(
   }
 
   for (; wr != nullptr; wr = wr->next) {
-    if (const int refusal = postSendWr(ibvqp, *qp, wr); refusal != 0) {
+    if (const int refusal = postSendWr(*ibvqp, *qp, *wr); refusal != 0) {
       *bad_wr = wr;
       return withErrno(refusal);
     }
@@ -2483,15 +2483,15 @@ int MetaRoceVerbs::ibv_post_send(
 }
 
 int MetaRoceVerbs::postRecvWr(
-    struct ibv_qp* ibvqp,
+    struct ibv_qp& ibvqp,
     Qp& qp,
-    const struct ibv_recv_wr* wr) {
-  if (wr->num_sge < 0 || wr->num_sge > 1 ||
-      (wr->num_sge == 1 && wr->sg_list == nullptr)) {
+    const struct ibv_recv_wr& wr) {
+  if (wr.num_sge < 0 || wr.num_sge > 1 ||
+      (wr.num_sge == 1 && wr.sg_list == nullptr)) {
     return EINVAL;
   }
-  const struct ibv_sge* singleSge = wr->num_sge == 1 ? wr->sg_list : nullptr;
-  if (loadQpState(*ibvqp) == IBV_QPS_RESET) {
+  const struct ibv_sge* singleSge = wr.num_sge == 1 ? wr.sg_list : nullptr;
+  if (loadQpState(ibvqp) == IBV_QPS_RESET) {
     return EINVAL;
   }
 
@@ -2502,18 +2502,18 @@ int MetaRoceVerbs::postRecvWr(
   uint32_t lkey = 0;
   if (singleSge != nullptr) {
     const struct ibv_sge& sge = *singleSge;
-    addr = memoryRegions_.localAddressOf(ibvqp->pd, sge.addr, sge.lkey);
+    addr = memoryRegions_.localAddressOf(ibvqp.pd, sge.addr, sge.lkey);
     length = sge.length;
     lkey = sge.lkey;
   }
-  auto tagNum = qpAndTagToTag(ibvqp->qp_num);
+  auto tagNum = qpAndTagToTag(ibvqp.qp_num);
   const bool accepted = qp.postWqe(
       tagNum,
-      std::make_unique<ReceiveWqe>(wr->wr_id, addr, length, qp.getMtu(), lkey));
+      std::make_unique<ReceiveWqe>(wr.wr_id, addr, length, qp.getMtu(), lkey));
 
   if (!accepted) {
     LOG_FIRST_N(WARNING, 10)
-        << "post_recv past max_qp_wr on qp: " << ibvqp->qp_num;
+        << "post_recv past max_qp_wr on qp: " << ibvqp.qp_num;
     return ENOMEM;
   }
 
@@ -2553,7 +2553,7 @@ int MetaRoceVerbs::ibv_post_recv(
   }
 
   for (; wr != nullptr; wr = wr->next) {
-    if (const int refusal = postRecvWr(ibvqp, *qp, wr); refusal != 0) {
+    if (const int refusal = postRecvWr(*ibvqp, *qp, *wr); refusal != 0) {
       *bad_wr = wr;
       return withErrno(refusal);
     }

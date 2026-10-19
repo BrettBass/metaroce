@@ -408,8 +408,8 @@ class MetaRoceVerbs : public RdmaVerbs, public folly::NonCopyableNonMovable {
       const struct ibv_sge* singleSge);
 
   // Posts one work request of a chain: 0, or the errno that refuses it.
-  int postSendWr(struct ibv_qp* ibvqp, Qp& qp, const struct ibv_send_wr* wr);
-  int postRecvWr(struct ibv_qp* ibvqp, Qp& qp, const struct ibv_recv_wr* wr);
+  int postSendWr(struct ibv_qp& ibvqp, Qp& qp, const struct ibv_send_wr& wr);
+  int postRecvWr(struct ibv_qp& ibvqp, Qp& qp, const struct ibv_recv_wr& wr);
 
   // Drain receives, run ~Qp, then free the QP's Tags' ibv_qp handles.
   void tearDownQp(std::unique_ptr<Qp> qp);
