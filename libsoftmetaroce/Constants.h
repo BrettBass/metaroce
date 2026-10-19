@@ -93,8 +93,6 @@ inline constexpr uint32_t kFirstCompletionQueueHandle = 1;
 // --- Shared Receive Queue ---
 inline constexpr uint32_t kFirstSharedReceiveQueueHandle = 1;
 inline constexpr uint32_t kMaxSrqWorkRequests = kMaxQpWorkRequests;
-// A shared receive holds one scatter-gather entry.
-inline constexpr uint32_t kMaxSrqSges = 1;
 inline constexpr uint32_t kMaxSharedReceiveQueues = 1024;
 
 // --- Protection Domain ---

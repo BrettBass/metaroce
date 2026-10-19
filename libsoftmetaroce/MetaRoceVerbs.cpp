@@ -919,7 +919,7 @@ int MetaRoceVerbs::ibv_query_device(
   device_attr->max_srq = kMaxSharedReceiveQueues;
   device_attr->max_pd = kMaxProtectionDomains;
   device_attr->max_srq_wr = kMaxSrqWorkRequests;
-  device_attr->max_srq_sge = kMaxSrqSges;
+  device_attr->max_srq_sge = kMaxSgesPerWorkRequest;
   device_attr->max_qp_rd_atom = kMaxOutstandingReadAtomic;
   device_attr->max_qp_init_rd_atom = kMaxOutstandingReadAtomic;
   device_attr->max_res_rd_atom = kMaxQpWorkRequests;
@@ -1275,7 +1275,7 @@ struct ibv_srq* FOLLY_NULLABLE MetaRoceVerbs::ibv_create_srq(
   const uint32_t maxSge = srq_init_attr->attr.max_sge;
   // A queue that can hold no receive serves no queue pair.
   if (maxWorkRequests == 0 || maxWorkRequests > kMaxSrqWorkRequests ||
-      maxSge > kMaxSrqSges) {
+      maxSge > kMaxSgesPerWorkRequest) {
     return nullSettingErrno(EINVAL);
   }
   const auto lockedProtectionDomains = protectionDomains_.rlock();

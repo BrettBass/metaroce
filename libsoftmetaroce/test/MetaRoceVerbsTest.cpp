@@ -5638,6 +5638,96 @@ static std::pair<BaseHeader, DataHeader> singlePacketHeaders(
           .build()};
 }
 
+TEST_F(VerbsTest, AMultiSgeSharedReceiveScattersAnArrivingSend) {
+  struct ibv_srq_init_attr srqInitAttr{
+      .attr = ibv_srq_attr{.max_wr = 4, .max_sge = 3}};
+  struct ibv_srq* const srq = verbs_.ibv_create_srq(pd_, &srqInitAttr);
+  ASSERT_NE(srq, nullptr);
+  struct ibv_qp* const ibvqp = setupQpOnSharedQueue(
+      verbs_, cq_, pd_, srq, folly::IPAddressV6("fc00::1"), kDestQpNum);
+  ASSERT_NE(ibvqp, nullptr);
+  Qp* const qp = verbs_.getQpByNum(MetaRoceVerbs::qpAndTagToQp(ibvqp->qp_num));
+  ASSERT_NE(qp, nullptr);
+
+  std::array<char, 20> first{};
+  std::array<char, 20> second{};
+  std::array<char, 24> third{};
+  const std::array<std::span<char>, 3> segments{first, second, third};
+  std::array<ibv_sge, 3> sges{};
+  std::vector<ibv_mr*> mrs;
+  for (size_t i = 0; i < segments.size(); ++i) {
+    ibv_mr* const mr = verbs_.ibv_reg_mr_internal(
+        pd_, segments[i].data(), segments[i].size(), IBV_ACCESS_LOCAL_WRITE);
+    ASSERT_NE(mr, nullptr);
+    mrs.push_back(mr);
+    sges[i] = {
+        .addr = reinterpret_cast<uint64_t>(segments[i].data()),
+        .length = static_cast<uint32_t>(segments[i].size()),
+        .lkey = mr->lkey,
+    };
+  }
+  struct ibv_recv_wr recvWr{
+      .wr_id = 300,
+      .sg_list = sges.data(),
+      .num_sge = static_cast<int>(sges.size()),
+  };
+  struct ibv_recv_wr* badWr = nullptr;
+  ASSERT_EQ(verbs_.ibv_post_srq_recv(srq, &recvWr, &badWr), 0)
+      << "precondition: a shared receive of three registered sges is accepted";
+
+  const auto payload = countingBytes(64, 1);
+  const auto [baseHeader, dataHeader] = singlePacketHeaders(
+      *qp,
+      BaseHeader::Opcode::OperationType::SEND,
+      /*fsn=*/0,
+      qp->getTag(kMetaRoceInitialTag)->getNextMsn(),
+      /*csn=*/0);
+  const DataPacket send(baseHeader, dataHeader, payload.data(), payload.size());
+  qp->getRxFlowById(0)->processDataPacket(&send, kEcnECT0);
+
+  std::vector<char> scattered;
+  for (const std::span<char> segment : segments) {
+    scattered.insert(scattered.end(), segment.begin(), segment.end());
+  }
+  EXPECT_EQ(scattered, payload)
+      << "a shared receive takes a message across its sges in order";
+  struct ibv_wc wc{};
+  ASSERT_TRUE(pollOneCompletion(verbs_, cq_, wc))
+      << "the whole message arrived, so the receive must complete";
+  EXPECT_EQ(wc.status, IBV_WC_SUCCESS)
+      << "every sge is registered for local write";
+  EXPECT_EQ(wc.wr_id, 300u)
+      << "the completion reports the shared receive the message took";
+  EXPECT_EQ(wc.byte_len, payload.size())
+      << "the completion reports the bytes across every sge";
+
+  EXPECT_EQ(verbs_.ibv_destroy_qp(ibvqp), 0);
+  EXPECT_EQ(verbs_.ibv_destroy_srq(srq), 0);
+  for (ibv_mr* mr : mrs) {
+    EXPECT_EQ(verbs_.ibv_dereg_mr(mr), 0);
+  }
+}
+
+TEST_F(VerbsTest, ASharedReceiveQueueTakesEverySgeTheDeviceReports) {
+  struct ibv_srq_init_attr pastTheLimit{
+      .attr = ibv_srq_attr{.max_wr = 4, .max_sge = kMaxSgesPerWorkRequest + 1}};
+  EXPECT_EQ(verbs_.ibv_create_srq(pd_, &pastTheLimit), nullptr)
+      << "a queue may not ask for more sges than max_srq_sge";
+
+  struct ibv_srq_init_attr atTheLimit{
+      .attr = ibv_srq_attr{.max_wr = 4, .max_sge = kMaxSgesPerWorkRequest}};
+  struct ibv_srq* const srq = verbs_.ibv_create_srq(pd_, &atTheLimit);
+  ASSERT_NE(srq, nullptr) << "a queue may ask for every sge max_srq_sge allows";
+  std::array<ibv_sge, kMaxSgesPerWorkRequest> sges{};
+  struct ibv_recv_wr recvWr{
+      .sg_list = sges.data(), .num_sge = static_cast<int>(sges.size())};
+  struct ibv_recv_wr* badWr = nullptr;
+  EXPECT_EQ(verbs_.ibv_post_srq_recv(srq, &recvWr, &badWr), 0)
+      << "a post may use every sge its queue was created with";
+
+  EXPECT_EQ(verbs_.ibv_destroy_srq(srq), 0);
+}
+
 // Each case posts at a nonzero offset into a sentinel-filled buffer and
 // compares the whole buffer, so bytes landing anywhere but at the offset show.
 class ZeroBasedLocalBufferTest : public VerbsTest {
