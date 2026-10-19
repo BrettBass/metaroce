@@ -210,6 +210,7 @@ set(LSMR_LIB_SRCS
     RnrState.cpp
     RxFlow.cpp
     Sender.cpp
+    SgeList.cpp
     SharedReceiveQueue.cpp
     SourcePortCounter.cpp
     Tag.cpp
@@ -301,6 +302,7 @@ set(LSMR_LIB_SRCS
     RxFlow.h
     Sender.h
     SequenceNumbers.h
+    SgeList.h
     SharedReceiveQueue.h
     ShiftableBitset.h
     SourcePortCounter.h

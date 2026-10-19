@@ -20,12 +20,14 @@
 #include <folly/Synchronized.h>
 #include <infiniband/verbs.h>
 #include <libsoftmetaroce/Constants.h>
+#include <libsoftmetaroce/SgeList.h>
 #include <libsoftmetaroce/codec/ReadWriteHeader.h>
 #include <algorithm>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 
 namespace libsoftmetaroce {
 
@@ -110,6 +112,14 @@ class MemoryRegions {
       char* FOLLY_NULLABLE address,
       uint32_t length,
       uint32_t key,
+      int requiredAccess) const;
+
+  // Validates the first length bytes across sges under their lkeys.
+  // Returns false if the sges are too short.
+  bool isValidLocal(
+      const struct ibv_pd* pd,
+      std::span<const LocalSge> sges,
+      uint32_t length,
       int requiredAccess) const;
 
   // The virtual address a local SGE identifies: for a zero-based region of pd,

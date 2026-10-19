@@ -71,6 +71,7 @@ set(LSMR_TEST_SRCS
     RoceV2iCRCTest.cpp
     RttEstimatorTest.cpp
     SenderTest.cpp
+    SgeListTest.cpp
     SharedReceiveQueueTest.cpp
     ShiftableBitsetTest.cpp
     SourcePortCounterTest.cpp

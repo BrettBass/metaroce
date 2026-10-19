@@ -123,6 +123,27 @@ bool MemoryRegions::isValidLocal(
       .has_value();
 }
 
+bool MemoryRegions::isValidLocal(
+    const struct ibv_pd* pd,
+    std::span<const LocalSge> sges,
+    uint32_t length,
+    int requiredAccess) const {
+  uint32_t remaining = length;
+  for (const LocalSge& sge : sges) {
+    const uint32_t covered = std::min(sge.length, remaining);
+    if (!isValidLocal(
+            pd,
+            static_cast<char*>(sge.address),
+            covered,
+            sge.lkey,
+            requiredAccess)) {
+      return false;
+    }
+    remaining -= covered;
+  }
+  return remaining == 0;
+}
+
 void* FOLLY_NULLABLE MemoryRegions::localAddressOf(
     const struct ibv_pd* pd,
     uint64_t addr,

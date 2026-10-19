@@ -205,5 +205,35 @@ TEST_F(MemoryRegionsTest, ALocalOffsetThatWouldWrapResolvesToNoAddress) {
       << "the local check refuses the unresolvable offset";
 }
 
+TEST_F(MemoryRegionsTest, EverySgeIsCheckedUnderItsOwnKey) {
+  std::array<char, 64> other{};
+  struct ibv_mr* first = registerBuffer(IBV_ACCESS_LOCAL_WRITE);
+  struct ibv_mr* second = regions_.reg_mr(
+      nullptr, other.data(), other.size(), IBV_ACCESS_LOCAL_WRITE);
+  ASSERT_NE(first, nullptr);
+  ASSERT_NE(second, nullptr);
+
+  const std::array<LocalSge, 2> sges{{
+      {.address = buffer_.data(), .length = 128, .lkey = first->lkey},
+      {.address = other.data(), .length = 64, .lkey = second->lkey},
+  }};
+  EXPECT_TRUE(regions_.isValidLocal(nullptr, sges, 192, IBV_ACCESS_LOCAL_WRITE))
+      << "each sge lies within the region its own key registered";
+
+  const std::array<LocalSge, 2> wrongKey{{
+      {.address = buffer_.data(), .length = 128, .lkey = first->lkey},
+      {.address = other.data(), .length = 64, .lkey = first->lkey},
+  }};
+  EXPECT_FALSE(
+      regions_.isValidLocal(nullptr, wrongKey, 192, IBV_ACCESS_LOCAL_WRITE))
+      << "the second sge lies outside the region its key identifies";
+  EXPECT_TRUE(
+      regions_.isValidLocal(nullptr, wrongKey, 128, IBV_ACCESS_LOCAL_WRITE))
+      << "a message ending within the first sge touches none of the second";
+  EXPECT_FALSE(
+      regions_.isValidLocal(nullptr, sges, 193, IBV_ACCESS_LOCAL_WRITE))
+      << "a length past the last sge has bytes no region was checked for";
+}
+
 } // namespace
 } // namespace libsoftmetaroce
