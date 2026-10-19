@@ -113,6 +113,34 @@ uint16_t Sender::getAlternateSocket(const uint16_t socketId) {
   return nsockid;
 }
 
+uint16_t Sender::getAlternateAckSocket(const uint16_t socketId) {
+  auto assignment = socketAssignment_.lock();
+  CHECK_LT(socketId, assignment->socketCount)
+      << "getAlternateAckSocket: socket id out of range";
+  // A raw transport has no UDP source port to vary.
+  if (sockets_[socketId].ack->getSocket() == nullptr) {
+    return socketId;
+  }
+  const folly::IPAddress& localAddr =
+      getAddressFromSocketIdLocked(assignment, socketId);
+  const auto it = assignment->localAddrToSocketIds.find(localAddr);
+  CHECK(it != assignment->localAddrToSocketIds.end())
+      << "socket has no registered address";
+  const auto& ids = it->second;
+  auto next = ids.find(socketId);
+  CHECK(next != ids.end()) << "socket id not registered under its address";
+  if (++next == ids.end()) {
+    next = ids.begin();
+  }
+  if (*next != socketId) {
+    return *next;
+  }
+  if (!hasRoomForSocket(assignment)) {
+    return socketId;
+  }
+  return createSocketWithLocalAddr(assignment, localAddr, ibv_gid_entry{});
+}
+
 void Sender::shutdownAndJoinSendLoops() noexcept {
   cancellationSource_.requestCancellation();
   folly::coro::blockingWait([this]() -> folly::coro::Task<> {

@@ -94,6 +94,17 @@ class SenderTest : public TestWithParam<int> {
     return dynamic_cast<MockUDPSocket*>(sender->getSocketById(socketId));
   }
 
+  // A sender without a send loop or the test sender's one-socket limit.
+  std::unique_ptr<LimitedTestSender> createUnlimitedTestSender() {
+    auto sender = std::make_unique<LimitedTestSender>(
+        arbiter,
+        mockUDPSocketMaker,
+        kMetaRoceSendToPort,
+        LimitedTestSender::kDisableSendLoop);
+    sender->setLimitNumSockets(LimitedTestSender::kMaxSocketsNoLimit);
+    return sender;
+  }
+
   // Struct to hold payload for WQE - keeps payload alive
   struct TestWqePayload {
     std::unique_ptr<char[]> payload;
@@ -226,6 +237,47 @@ TEST_F(SenderTest, RepathAtTheSocketLimitKeepsItsSocket) {
   EXPECT_THROW(sender.getSocketById(socketId + 1), std::out_of_range)
       << "the socket limit caps the sockets a repath creates, as it caps "
          "those a new assignment creates";
+}
+
+TEST_F(SenderTest, AckSocketCyclesThroughSameAddressSockets) {
+  auto sender = createUnlimitedTestSender();
+  const uint16_t first = sender->getSocketIdFromAddress(localAddr);
+  std::ignore = sender->getSocketIdFromAddress(localAddr);
+  std::ignore = sender->getSocketIdFromAddress(localAddr);
+
+  const uint16_t next = sender->getAlternateAckSocket(first);
+  const uint16_t after = sender->getAlternateAckSocket(next);
+  EXPECT_EQ((std::set<uint16_t>{first, next, after}).size(), 3u)
+      << "successive changes give the ACK a source port it has not used yet";
+  EXPECT_EQ(sender->getAlternateAckSocket(after), first)
+      << "the ACK returns to its first socket only after using each other "
+         "socket on the address";
+}
+
+TEST_F(SenderTest, AckSocketCreatesOnItsAddressWhenAlone) {
+  auto sender = createUnlimitedTestSender();
+  const uint16_t only = sender->getSocketIdFromAddress(localAddr);
+  std::ignore = sender->getSocketIdFromAddress(folly::IPAddress{"fc00::2"});
+
+  const uint16_t created = sender->getAlternateAckSocket(only);
+  EXPECT_NE(created, only)
+      << "a lone socket cannot change the ACK source port, so one is created";
+  EXPECT_EQ(sender->getAddressFromSocketId(created), localAddr)
+      << "the ACK keeps the flow's local address while its source port moves";
+}
+
+TEST_F(SenderTest, AckSocketAtLimitKeepsCurrent) {
+  LimitedTestSender sender(
+      arbiter,
+      mockUDPSocketMaker,
+      kMetaRoceSendToPort,
+      LimitedTestSender::kDisableSendLoop);
+  sender.setLimitNumSockets(1);
+  const uint16_t socketId = sender.getSocketIdFromAddress(localAddr);
+
+  EXPECT_EQ(sender.getAlternateAckSocket(socketId), socketId)
+      << "with one socket allowed and no alternative, the ACK keeps its "
+         "socket";
 }
 
 TEST_F(SenderTest, SendSocketsTakeSuccessivePortsInTheSpecRange) {

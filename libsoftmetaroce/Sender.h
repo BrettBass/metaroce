@@ -118,6 +118,15 @@ class Sender : public folly::NonCopyableNonMovable {
    */
   [[nodiscard]] uint16_t getAlternateSocket(const uint16_t socketId);
 
+  /*
+   * Return the next socket on socketId's local address, so successive calls
+   * cycle through that address's sockets; each binds its own UDP source port,
+   * which changes the ACK entropy. Where socketId is alone on its address,
+   * creates another there if the socket limit allows. Returns socketId on a
+   * raw transport or when it cannot create one.
+   */
+  [[nodiscard]] uint16_t getAlternateAckSocket(uint16_t socketId);
+
   // The per-turn send cap, so a QP can bound how long it holds one tx flow.
   [[nodiscard]] uint32_t getSendBatch() const {
     return sendBatch_;
