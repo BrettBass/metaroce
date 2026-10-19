@@ -1750,4 +1750,78 @@ TEST_F(WqeTest, AReceiveRefusesBytesPastThePosn) {
       << "the extra byte would land in posn 1, which another packet fills";
 }
 
+void expectCanHaveSendPayload(const Wqe& wqe, bool expected) {
+  EXPECT_EQ(wqe.canHaveSendPayload(), expected)
+      << wqe.getWorkType()
+      << (expected ? " may put message bytes on the wire"
+                   : " sends a request frame or header values only");
+}
+
+TEST_F(WqeTest, SendPathWorkTypesReportTheirPayloadRequirement) {
+  std::array<uint8_t, 64> buffer{};
+  const auto size = static_cast<uint32_t>(buffer.size());
+  expectCanHaveSendPayload(
+      SendWqe(kInlineWorkReqId, oneSge(buffer), kInlineMtu), true);
+  expectCanHaveSendPayload(
+      SendWithImmWqe(
+          kInlineWorkReqId, oneSge(buffer), kInlineMtu, kInlineImmediateData),
+      true);
+  expectCanHaveSendPayload(
+      ReadWriteWqe(
+          Wqe::WorkType::kWrite,
+          kInlineWorkReqId,
+          oneSge(buffer),
+          kInlineMtu,
+          kInlineRemoteAddress,
+          kInlineRkey),
+      true);
+  expectCanHaveSendPayload(
+      WriteWithImmWqe(
+          kInlineWorkReqId,
+          oneSge(buffer),
+          kInlineMtu,
+          kInlineRemoteAddress,
+          kInlineRkey,
+          kInlineImmediateData),
+      true);
+  expectCanHaveSendPayload(
+      VirtualSendWqe(1, buffer.data(), size, kInlineMtu), true);
+
+  expectCanHaveSendPayload(
+      ReadWriteWqe(
+          Wqe::WorkType::kRead,
+          kInlineWorkReqId,
+          oneSge(buffer),
+          kInlineMtu,
+          kInlineRemoteAddress,
+          kInlineRkey),
+      false);
+  expectCanHaveSendPayload(
+      ReadWithImmWqe(
+          kInlineWorkReqId,
+          oneSge(buffer),
+          kInlineMtu,
+          kInlineRemoteAddress,
+          kInlineRkey,
+          kInlineImmediateData),
+      false);
+  for (const auto workType :
+       {Wqe::WorkType::kAtomicFetchAdd, Wqe::WorkType::kAtomicCmpSwp}) {
+    expectCanHaveSendPayload(
+        AtomicWqe(
+            workType,
+            kInlineWorkReqId,
+            LocalSge{
+                .address = buffer.data(), .length = kAtomicOperationSizeBytes},
+            kInlineMtu,
+            kInlineRemoteAddress,
+            kInlineRkey,
+            /*swapOrAddData=*/1,
+            /*compareData=*/0,
+            IBV_SEND_SIGNALED),
+        false);
+  }
+  expectCanHaveSendPayload(VirtualAtomicAckWqe(1, 0), false);
+  expectCanHaveSendPayload(VirtualAtomicExecWqe(1, true, 0, 1, 0), false);
+}
 } // namespace libsoftmetaroce

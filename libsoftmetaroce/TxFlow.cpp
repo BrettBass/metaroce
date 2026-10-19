@@ -488,14 +488,9 @@ std::unique_ptr<struct EgressPacket> TxFlow::getNextPacketToSendFromWqe(
 
   auto posn = wqe.allocateNextPosn();
   qp_.tagSet_.decrementUnsentPosns();
-  const uint32_t sendPayloadSize =
-      (wqe.getWorkType() == Wqe::WorkType::kRead ||
-       wqe.getWorkType() == Wqe::WorkType::kReadWithImm ||
-       wqe.getWorkType() == Wqe::WorkType::kAtomicFetchAdd ||
-       wqe.getWorkType() == Wqe::WorkType::kAtomicCmpSwp ||
-       wqe.getWorkType() == Wqe::WorkType::kVirtualAtomicAck)
-      ? 0
-      : wqe.getPosnPayloadSizeBytes(posn, qp_.getMtu());
+  const uint32_t sendPayloadSize = wqe.canHaveSendPayload()
+      ? wqe.getPosnPayloadSizeBytes(posn, qp_.getMtu())
+      : 0;
 
   VLOG(2) << "TxFlow::getNextPacketToSendFromWqe: Sending data fsn: "
           << txState_.sndNxt << " msn: " << wqe.getMsn().value()
