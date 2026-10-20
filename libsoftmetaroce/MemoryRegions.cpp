@@ -34,12 +34,12 @@ const RegisteredMemoryRegion* FOLLY_NULLABLE regionUnder(
                << " is not among our registered memory regions";
     return nullptr;
   }
-  if (it->second->mr.pd != pd) {
+  if (it->second.mr.pd != pd) {
     LOG(ERROR) << "Memory region validation failed protection domain check. "
                << "key:" << key << " matches a region of another domain";
     return nullptr;
   }
-  return it->second.get();
+  return &it->second;
 }
 
 } // namespace
@@ -152,10 +152,10 @@ void* FOLLY_NULLABLE MemoryRegions::localAddressOf(
   const auto it = lockedRegions->find(key);
   // A zero-length SGE may hold a key that identifies no region.
   const bool keyIdentifiesARegionOfPd =
-      it != lockedRegions->end() && it->second->mr.pd == pd;
+      it != lockedRegions->end() && it->second.mr.pd == pd;
   // Only a nonzero base can overflow, and no such region contains address 0.
   const uint64_t resolved = keyIdentifiesARegionOfPd
-      ? it->second->resolvedAddress(addr).value_or(0)
+      ? it->second.resolvedAddress(addr).value_or(0)
       : addr;
   // An SGE holds its address as a uint64_t; callers store it as a pointer.
   // NOLINTNEXTLINE(performance-no-int-to-ptr)
@@ -215,18 +215,18 @@ struct ibv_mr* FOLLY_NULLABLE MemoryRegions::reg_mr(
   auto lockedRegions = memoryRegions_.wlock();
   const uint32_t key = ++last_key_;
 
-  auto stored = std::make_unique<RegisteredMemoryRegion>(RegisteredMemoryRegion{
-      .mr =
-          {.context = nullptr,
-           .pd = pd,
-           .addr = addr,
-           .length = length,
-           .handle = key,
-           .lkey = key,
-           .rkey = key},
-      .access = access});
-  struct ibv_mr* ret = &stored->mr;
-  (*lockedRegions)[key] = std::move(stored);
-  return ret;
+  auto placed = lockedRegions->emplace(
+      key,
+      RegisteredMemoryRegion{
+          .mr =
+              {.context = nullptr,
+               .pd = pd,
+               .addr = addr,
+               .length = length,
+               .handle = key,
+               .lkey = key,
+               .rkey = key},
+          .access = access});
+  return &placed.first->second.mr;
 }
 } // namespace libsoftmetaroce

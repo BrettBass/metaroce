@@ -58,8 +58,7 @@ struct RegisteredMemoryRegion {
   permits(uint64_t address, uint32_t length, int requiredAccess) const;
 };
 
-using MemoryRegionsMap =
-    std::map<uint32_t, std::unique_ptr<RegisteredMemoryRegion>>;
+using MemoryRegionsMap = std::map<uint32_t, RegisteredMemoryRegion>;
 
 class MemoryRegions {
  public:
@@ -92,7 +91,7 @@ class MemoryRegions {
   [[nodiscard]] bool holdsRegionOf(const struct ibv_pd* pd) const {
     const auto locked = memoryRegions_.rlock();
     return std::any_of(locked->begin(), locked->end(), [pd](const auto& entry) {
-      return entry.second->mr.pd == pd;
+      return entry.second.mr.pd == pd;
     });
   }
 
