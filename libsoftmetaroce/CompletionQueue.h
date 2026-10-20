@@ -22,6 +22,7 @@
 
 #include <libsoftmetaroce/Constants.h>
 #include <libsoftmetaroce/Cqe.h>
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
@@ -30,12 +31,16 @@ namespace libsoftmetaroce {
 
 class CompletionQueue {
  public:
-  // `reportOverflow` is called where the depth refuses a completion, outside
-  // the lock the check takes. Fixed here, so no reader of it can race a write.
+  // Calls reportOverflow when tryEnqueue rejects a completion at capacity.
+  // Calls raiseCompletionEvent for the first completion enqueued after arming.
+  // Both callbacks run after admission_ is released.
   explicit CompletionQueue(
       uint32_t depth = kMaxCqEntries,
-      std::function<void()> reportOverflow = {})
-      : reportOverflow_{std::move(reportOverflow)}, depth_{depth} {}
+      std::function<void()> reportOverflow = {},
+      std::function<void()> raiseCompletionEvent = {})
+      : reportOverflow_{std::move(reportOverflow)},
+        raiseCompletionEvent_{std::move(raiseCompletionEvent)},
+        depth_{depth} {}
   ~CompletionQueue();
 
   CompletionQueue(const CompletionQueue&) = delete;
@@ -67,9 +72,20 @@ class CompletionQueue {
   // `ibv_get_async_event(3)` requires of the destroy that frees it.
   void waitForEventsAcked();
 
+  // Arms one completion event, as `ibv_req_notify_cq(3)` does.
+  void requestNotification();
+  // Completion events a client has taken with `ibv_get_cq_event` and not yet
+  // acked; `ibv_destroy_cq` refuses while any are.
+  void takeRetrievedCompletionEvent();
+  void releaseRetrievedCompletionEvents(size_t count);
+  [[nodiscard]] bool hasUnackedCompletionEvents() const;
+
  private:
+  void raiseCompletionEventIfArmed();
+
   // Injected dependencies.
   const std::function<void()> reportOverflow_;
+  const std::function<void()> raiseCompletionEvent_;
 
   // Configuration.
   // What `ibv_create_cq` asked for. The queue can hold one past it: a poll that
@@ -83,14 +99,17 @@ class CompletionQueue {
   static constexpr size_t kLgEntriesPerSegment = 5;
   folly::coro::UnboundedQueue<Cqe, false, false, false, kLgEntriesPerSegment>
       completionQueue_;
-  // Work queues that can still stage a completion here, and events raised and
-  // not yet acked. A destroy refuses for the first and waits for the second.
   struct References {
+    // A destroy refuses while a work queue can still stage a completion here.
     size_t workQueues{0};
+    // A destroy waits on an event raised for this queue and not yet acked.
     size_t outstandingEvents{0};
+    // A destroy refuses while a taken event is still unacked.
+    size_t retrievedCompletionEvents{0};
   };
   folly::Synchronized<References, std::mutex> references_;
   std::condition_variable allEventsAcked_;
+  std::atomic<bool> armed_{false};
 };
 
 } // namespace libsoftmetaroce

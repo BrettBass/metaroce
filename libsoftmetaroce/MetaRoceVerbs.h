@@ -184,6 +184,14 @@ class MetaRoceVerbs : public RdmaVerbs, public folly::NonCopyableNonMovable {
   int ibv_dereg_mr(struct ibv_mr* mr) override;
   int ibv_dealloc_pd(struct ibv_pd* pd) override;
   int ibv_destroy_comp_channel(struct ibv_comp_channel* channel) override;
+  int ibv_req_notify_cq(struct ibv_cq* cq, int solicited_only) override;
+  // Blocks unless channel->fd has O_NONBLOCK. A poll/epoll client should set
+  // O_NONBLOCK and handle EAGAIN: the fd can be readable with no event left.
+  int ibv_get_cq_event(
+      struct ibv_comp_channel* channel,
+      struct ibv_cq** cq,
+      void** cq_context) override;
+  void ibv_ack_cq_events(struct ibv_cq* cq, unsigned int nevents) override;
 
   // The caller keeps the observer alive for the rest of this instance's life.
   void registerConnectionObserver(ConnectionObserver& observer);
@@ -228,7 +236,8 @@ class MetaRoceVerbs : public RdmaVerbs, public folly::NonCopyableNonMovable {
   };
   [[nodiscard]] std::optional<AllocatedCq> allocateCompletionQueue(
       uint32_t depth,
-      std::function<void()> reportOverflow = {}) {
+      std::function<void()> reportOverflow = {},
+      std::function<void()> raiseCompletionEvent = {}) {
     auto locked = handleToCq_.wlock();
     if (locked->size() >= kMaxCompletionQueues) {
       return std::nullopt;
@@ -247,7 +256,10 @@ class MetaRoceVerbs : public RdmaVerbs, public folly::NonCopyableNonMovable {
            "one";
     auto [it, inserted] = locked->insert(
         {*maybeHandle,
-         std::make_unique<CompletionQueue>(depth, std::move(reportOverflow))});
+         std::make_unique<CompletionQueue>(
+             depth,
+             std::move(reportOverflow),
+             std::move(raiseCompletionEvent))});
     CHECK(inserted)
         << "nextFreeId skips a handle handleToCq_ already holds, under the "
            "write lock this insert takes";
@@ -355,6 +367,9 @@ class MetaRoceVerbs : public RdmaVerbs, public folly::NonCopyableNonMovable {
     std::deque<struct ibv_async_event> events;
   };
 
+  // Queues an event for ibv_get_cq_event on `cq`'s channel and wakes a poll of
+  // the channel's fd.
+  void raiseCompletionEvent(struct ibv_cq* cq);
   // Queues an event for ibv_get_async_event and wakes a poll of async_fd.
   // Dropped unless `context` is open and its id still matches `contextId`.
   // True where the event is queued for a client to take.
@@ -441,6 +456,16 @@ class MetaRoceVerbs : public RdmaVerbs, public folly::NonCopyableNonMovable {
   // returned has an entry here, so a miss is one this object did not open.
   folly::Synchronized<folly::F14FastMap<struct ibv_context*, AsyncEventQueue>>
       contextEvents_;
+  // Completion events waiting for ibv_get_cq_event, oldest first, and how many
+  // completion queues report to the channel. Only a channel
+  // ibv_create_comp_channel returned has an entry here.
+  struct CompChannelState {
+    std::deque<struct ibv_cq*> events;
+    size_t completionQueues{0};
+  };
+  folly::Synchronized<
+      folly::F14FastMap<struct ibv_comp_channel*, CompChannelState>>
+      compChannels_;
   std::atomic<uint64_t> nextContextId_{1};
   // A create holds this read lock from the membership test through registering
   // its object, so a deallocate cannot free the domain between the two.

@@ -34,6 +34,7 @@
 #include <linux/membarrier.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <algorithm>
@@ -470,6 +471,288 @@ TEST_F(VerbsTest, ACompletionQueueAtTheAdvertisedDepthIsCreated) {
       << "the queue reports at least the depth it was asked for, which is what "
          "a caller sizing its batch reads back";
   EXPECT_EQ(verbs_.ibv_destroy_cq(deepest), 0);
+}
+
+TEST_F(VerbsTest, ANotificationRequestOnAQueueWithoutAChannelIsRefused) {
+  errno = 0;
+  EXPECT_EQ(verbs_.ibv_req_notify_cq(cq_, 0), EINVAL)
+      << "a queue created without a channel has nowhere to deliver the event, "
+         "so arming it would promise a wakeup that can never come";
+  EXPECT_EQ(errno, EINVAL)
+      << "and the same code reaches a caller reading errno";
+}
+
+// The fixture's queue pair reports into a completion queue created on a
+// channel.
+class CompChannelVerbsTest : public VerbsTest {
+ protected:
+  void SetUp() override {
+    channel_ = verbs_.ibv_create_comp_channel(&context_);
+    ASSERT_NE(channel_, nullptr);
+    cq_ = verbs_.ibv_create_cq(&context_, kCqEntries, &cqContext_, channel_, 0);
+    ASSERT_NE(cq_, nullptr);
+    pd_ = verbs_.ibv_alloc_pd(&context_);
+    ASSERT_NE(pd_, nullptr);
+  }
+
+  void TearDown() override {
+    if (secondQp_ != nullptr) {
+      EXPECT_EQ(verbs_.ibv_destroy_qp(secondQp_), 0);
+    }
+    if (secondCq_ != nullptr) {
+      EXPECT_EQ(verbs_.ibv_destroy_cq(secondCq_), 0);
+    }
+    VerbsTest::TearDown();
+    EXPECT_EQ(verbs_.ibv_destroy_comp_channel(channel_), 0);
+  }
+
+  // A second completion queue on the fixture's channel, with a queue pair
+  // reporting into it.
+  void addSecondQueue() {
+    secondCq_ = verbs_.ibv_create_cq(
+        &context_, kCqEntries, &secondCqContext_, channel_, 0);
+    ASSERT_NE(secondCq_, nullptr);
+    secondQp_ = setup_qp(
+        verbs_,
+        secondCq_,
+        pd_,
+        folly::IPAddressV6("fc00::1"),
+        kDestQpNum + 1,
+        IBV_MTU_2048);
+    ASSERT_NE(secondQp_, nullptr);
+  }
+
+  // Completes one flushed send on the fixture's completion queue.
+  void completeOneSend() {
+    completeOneSendOn(fixtureQp(), cq_);
+  }
+
+  void completeOneSendOn(struct ibv_qp* ibvqp, struct ibv_cq* cq) {
+    ASSERT_NE(ibvqp, nullptr);
+    if (loadQpState(*ibvqp) != IBV_QPS_ERR) {
+      struct ibv_qp_attr attr{};
+      attr.qp_state = IBV_QPS_ERR;
+      ASSERT_EQ(verbs_.ibv_modify_qp(ibvqp, &attr, IBV_QP_STATE), 0);
+    }
+    struct ibv_send_wr wr{
+        .wr_id = 1, .opcode = IBV_WR_SEND, .send_flags = IBV_SEND_SIGNALED};
+    struct ibv_send_wr* badWr = nullptr;
+    ASSERT_EQ(verbs_.ibv_post_send(ibvqp, &wr, &badWr), 0);
+    struct ibv_wc wc{};
+    ASSERT_TRUE(pollOneCompletion(verbs_, cq, wc))
+        << "precondition: the send completes before the test checks the "
+           "notification it raises";
+  }
+
+  bool channelHasAnEventWaiting() const {
+    struct pollfd waiting{.fd = channel_->fd, .events = POLLIN};
+    return poll(&waiting, 1, 0) == 1;
+  }
+
+  int cqContext_{0};
+  int secondCqContext_{0};
+  struct ibv_comp_channel* channel_{nullptr};
+  struct ibv_cq* secondCq_{nullptr};
+  struct ibv_qp* secondQp_{nullptr};
+};
+
+TEST_F(CompChannelVerbsTest, AnArmedQueueWakesItsChannelOncePerRequest) {
+  completeOneSend();
+  EXPECT_FALSE(channelHasAnEventWaiting())
+      << "Notifications are opt-in; completing work must not wake an unarmed "
+         "channel.";
+
+  ASSERT_EQ(verbs_.ibv_req_notify_cq(cq_, 0), 0)
+      << "precondition: the queue is armed before its completions are "
+         "checked for events";
+  completeOneSend();
+  completeOneSend();
+  ASSERT_TRUE(channelHasAnEventWaiting())
+      << "the armed queue's completion wakes the waiting channel";
+  struct ibv_cq* woken = nullptr;
+  void* context = nullptr;
+  ASSERT_EQ(verbs_.ibv_get_cq_event(channel_, &woken, &context), 0)
+      << "precondition: the event is retrieved before the test checks which "
+         "queue it names";
+  EXPECT_EQ(woken, cq_)
+      << "A shared channel must identify which CQ the client should poll.";
+  EXPECT_EQ(context, &cqContext_)
+      << "the event carries the context the queue was created with";
+  EXPECT_FALSE(channelHasAnEventWaiting())
+      << "a notification request arms one event, so a second completion "
+         "raises none";
+  verbs_.ibv_ack_cq_events(cq_, 1);
+}
+
+TEST_F(CompChannelVerbsTest, AQueueWithAnUnackedEventIsNotDestroyed) {
+  ASSERT_EQ(verbs_.ibv_req_notify_cq(cq_, 0), 0)
+      << "precondition: the queue is armed before its completions are "
+         "checked for events";
+  completeOneSend();
+  struct ibv_cq* woken = nullptr;
+  void* context = nullptr;
+  ASSERT_EQ(verbs_.ibv_get_cq_event(channel_, &woken, &context), 0)
+      << "precondition: the event is retrieved before the destroy that must "
+         "refuse it";
+  ASSERT_EQ(verbs_.ibv_destroy_qp(qp_), 0);
+  qp_ = nullptr;
+
+  errno = 0;
+  EXPECT_EQ(verbs_.ibv_destroy_cq(cq_), EBUSY)
+      << "The client still holds the CQ through the retrieved event.";
+  EXPECT_EQ(errno, EBUSY)
+      << "This failure must be reported through errno as well as the return "
+         "value.";
+
+  verbs_.ibv_ack_cq_events(woken, 1);
+  EXPECT_EQ(verbs_.ibv_destroy_cq(cq_), 0)
+      << "once the event is acked nothing holds the queue";
+  cq_ = nullptr;
+}
+
+TEST_F(CompChannelVerbsTest, EventsPastThePipesCapacityAreAllDelivered) {
+  const int capacity = fcntl(channel_->fd, F_SETPIPE_SZ, 4096);
+  ASSERT_GT(capacity, 0)
+      << "precondition: the pipe is shrunk so filling it stays quick";
+  const int queued = capacity + 1;
+  for (int raised = 0; raised < queued; ++raised) {
+    ASSERT_EQ(verbs_.ibv_req_notify_cq(cq_, 0), 0)
+        << "precondition: the queue is armed before its completions are "
+           "checked for events";
+    ASSERT_NO_FATAL_FAILURE(completeOneSend())
+        << "precondition: a completion is taken before the test counts the "
+           "event it raises";
+  }
+  ASSERT_EQ(fcntl(channel_->fd, F_SETFL, O_NONBLOCK), 0)
+      << "precondition: reads fail rather than hang once no wakeup remains";
+
+  struct ibv_cq* woken = nullptr;
+  void* context = nullptr;
+  int delivered = 0;
+  for (; delivered < queued &&
+       verbs_.ibv_get_cq_event(channel_, &woken, &context) == 0;
+       ++delivered) {
+  }
+  EXPECT_EQ(delivered, queued)
+      << "Pipe capacity must not limit the number of queued notifications.";
+  verbs_.ibv_ack_cq_events(cq_, delivered);
+}
+
+TEST_F(CompChannelVerbsTest, QueuesSharingAChannelEachReportTheirOwnEvent) {
+  ASSERT_NO_FATAL_FAILURE(addSecondQueue())
+      << "precondition: a second queue shares the channel for the test to "
+         "tell their events apart";
+  ASSERT_EQ(verbs_.ibv_req_notify_cq(cq_, 0), 0)
+      << "precondition: the queue is armed before its completions are "
+         "checked for events";
+  ASSERT_EQ(verbs_.ibv_req_notify_cq(secondCq_, 0), 0)
+      << "precondition: the second queue is armed before its completions "
+         "are checked for events";
+  ASSERT_NO_FATAL_FAILURE(completeOneSend())
+      << "precondition: a completion is taken before the test checks the "
+         "event it raises";
+  ASSERT_NO_FATAL_FAILURE(completeOneSendOn(secondQp_, secondCq_))
+      << "precondition: the second queue takes a completion before the test "
+         "checks the event it raises";
+  ASSERT_EQ(fcntl(channel_->fd, F_SETFL, O_NONBLOCK), 0)
+      << "precondition: reads fail rather than hang once no wakeup remains";
+
+  struct ibv_cq* woken = nullptr;
+  void* context = nullptr;
+  ASSERT_EQ(verbs_.ibv_get_cq_event(channel_, &woken, &context), 0)
+      << "precondition: the event is retrieved before the test checks which "
+         "queue it names";
+  EXPECT_EQ(woken, cq_) << "events come back oldest first";
+  EXPECT_EQ(context, &cqContext_)
+      << "the event carries the context the queue was created with";
+  verbs_.ibv_ack_cq_events(woken, 1);
+  ASSERT_EQ(verbs_.ibv_get_cq_event(channel_, &woken, &context), 0)
+      << "taking one waiting event leaves the other for the next reader";
+  EXPECT_EQ(woken, secondCq_)
+      << "A shared channel must identify which CQ the client should poll.";
+  EXPECT_EQ(context, &secondCqContext_)
+      << "the event carries the context the queue was created with";
+  verbs_.ibv_ack_cq_events(woken, 1);
+
+  errno = 0;
+  EXPECT_EQ(verbs_.ibv_get_cq_event(channel_, &woken, &context), -1)
+      << "two events raised are two retrieved, with none invented after them";
+  EXPECT_EQ(errno, EAGAIN) << "no wakeup reads as EAGAIN rather than a failure";
+}
+
+TEST_F(CompChannelVerbsTest, TwoReadersEachTakeOneOfTwoWaitingEvents) {
+  for (int raised = 0; raised < 2; ++raised) {
+    ASSERT_EQ(verbs_.ibv_req_notify_cq(cq_, 0), 0)
+        << "precondition: the queue is armed before its completions are "
+           "checked for events";
+    ASSERT_NO_FATAL_FAILURE(completeOneSend())
+        << "precondition: a completion is taken before the test checks the "
+           "event it raises";
+  }
+
+  std::array<int, 2> results{-1, -1};
+  std::array<struct ibv_cq*, 2> woken{};
+  std::array<std::thread, 2> readers;
+  for (size_t reader = 0; reader < readers.size(); ++reader) {
+    readers[reader] = std::thread{[&, reader] {
+      void* context = nullptr;
+      results[reader] =
+          verbs_.ibv_get_cq_event(channel_, &woken[reader], &context);
+    }};
+  }
+  for (auto& reader : readers) {
+    reader.join();
+  }
+  for (size_t reader = 0; reader < readers.size(); ++reader) {
+    EXPECT_EQ(results[reader], 0)
+        << "the reader holding the only wakeup hands it on while events "
+           "remain";
+    EXPECT_EQ(woken[reader], cq_)
+        << "both waiting events belong to the one armed queue";
+  }
+  verbs_.ibv_ack_cq_events(cq_, 2);
+}
+
+TEST_F(CompChannelVerbsTest, ADestroyedQueuesEventDoesNotHideAnotherQueues) {
+  ASSERT_NO_FATAL_FAILURE(addSecondQueue())
+      << "precondition: a second queue shares the channel for the test to "
+         "tell their events apart";
+  ASSERT_EQ(verbs_.ibv_req_notify_cq(secondCq_, 0), 0)
+      << "precondition: the second queue is armed before its completions "
+         "are checked for events";
+  ASSERT_NO_FATAL_FAILURE(completeOneSendOn(secondQp_, secondCq_))
+      << "precondition: the second queue takes a completion before the test "
+         "checks the event it raises";
+  ASSERT_EQ(verbs_.ibv_destroy_qp(secondQp_), 0);
+  secondQp_ = nullptr;
+  EXPECT_EQ(verbs_.ibv_destroy_cq(secondCq_), 0)
+      << "an event never taken holds no reference to its queue";
+  secondCq_ = nullptr;
+
+  ASSERT_EQ(verbs_.ibv_req_notify_cq(cq_, 0), 0)
+      << "precondition: the queue is armed before its completions are "
+         "checked for events";
+  ASSERT_NO_FATAL_FAILURE(completeOneSend())
+      << "precondition: a completion is taken before the test checks the "
+         "event it raises";
+  struct ibv_cq* woken = nullptr;
+  void* context = nullptr;
+  ASSERT_EQ(verbs_.ibv_get_cq_event(channel_, &woken, &context), 0)
+      << "precondition: the event is retrieved before the test checks which "
+         "queue it names";
+  EXPECT_EQ(woken, cq_)
+      << "the destroyed queue's event goes with it, leaving the live "
+         "queue's event";
+  verbs_.ibv_ack_cq_events(woken, 1);
+}
+
+TEST_F(CompChannelVerbsTest, AChannelAQueueReportsIntoIsNotDestroyed) {
+  errno = 0;
+  EXPECT_EQ(verbs_.ibv_destroy_comp_channel(channel_), EBUSY)
+      << "a live queue would raise its next event into a freed channel";
+  EXPECT_EQ(errno, EBUSY)
+      << "This failure must be reported through errno as well as the return "
+         "value.";
 }
 
 TEST_F(VerbsTest, ANullCompletionQueueIsRefusedAsAMalformedArgument) {

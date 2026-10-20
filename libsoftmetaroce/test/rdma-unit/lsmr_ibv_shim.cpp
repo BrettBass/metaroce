@@ -70,9 +70,8 @@ static int lsmrOpsPollCq(ibv_cq* cq, int num_entries, ibv_wc* wc) {
   return shimVerbs().ibv_poll_cq(cq, num_entries, wc);
 }
 
-static int lsmrOpsReqNotifyCq(ibv_cq* /*cq*/, int /*solicited_only*/) {
-  // Poll-only emulation: no comp channel, so arming is a no-op.
-  return 0;
+static int lsmrOpsReqNotifyCq(ibv_cq* cq, int solicited_only) {
+  return shimVerbs().ibv_req_notify_cq(cq, solicited_only);
 }
 
 // Control-path verbs: real exported symbols, wrapped directly.
@@ -184,6 +183,17 @@ struct ibv_comp_channel* __wrap_ibv_create_comp_channel(
 
 int __wrap_ibv_destroy_comp_channel(struct ibv_comp_channel* channel) {
   return shimVerbs().ibv_destroy_comp_channel(channel);
+}
+
+int __wrap_ibv_get_cq_event(
+    struct ibv_comp_channel* channel,
+    struct ibv_cq** cq,
+    void** cq_context) {
+  return shimVerbs().ibv_get_cq_event(channel, cq, cq_context);
+}
+
+void __wrap_ibv_ack_cq_events(struct ibv_cq* cq, unsigned int nevents) {
+  shimVerbs().ibv_ack_cq_events(cq, nevents);
 }
 
 struct ibv_cq* __wrap_ibv_create_cq(

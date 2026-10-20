@@ -156,6 +156,8 @@ set(LSMR_RDMA_UNIT_WRAP_SYMS
     ibv_dereg_mr
     ibv_create_comp_channel
     ibv_destroy_comp_channel
+    ibv_get_cq_event
+    ibv_ack_cq_events
     ibv_create_cq
     ibv_destroy_cq
     ibv_create_qp
@@ -184,6 +186,30 @@ set(LSMR_RDMA_UNIT_GREEN
     LoopbackRcQpTest.BasicWriteLargePayload
     LoopbackRcQpTest.QpSigAll
     QpPostTest.OverflowSendWr
+    CqTest.AboveMaxCompVector
+    CqTest.Basic
+    CqTest.DestroyInvalidCq
+    CqTest.LargeCompVector
+    CqTest.MaxCqe
+    CqTest.NegativeCompVector
+    CqTest.NegativeCqe
+    CqTest.ShareChannel
+    CqTest.WithChannel
+    CqTest.ZeroCompVector
+    CqTest.ZeroCqe
+    CompChannelTest.Atomic
+    CompChannelTest.CreateDestroy
+    CompChannelTest.DeleteWithUnacked
+    CompChannelTest.DestroyChannelWithCqRef
+    CompChannelTest.DowngradeRequest
+    CompChannelTest.ManyOutstanding
+    CompChannelTest.MuxOntoSingleChannel
+    CompChannelTest.RecvUnsolicitedNofityAny
+    CompChannelTest.RequestNotificationInvalidCq
+    CompChannelTest.RequestNotificationOnCqWithoutCompChannel
+    CompChannelTest.SameQueueMultipleOutstanding
+    CompChannelTest.UpgradeRequest
+    CompChannelTest.Write
     LoopbackRcQpTest.SendManyWithOneOutstanding
     LoopbackRcQpTest.SendEmptySgl
     LoopbackRcQpTest.WriteZeroByteWithImmData

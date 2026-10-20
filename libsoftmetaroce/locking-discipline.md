@@ -19,6 +19,8 @@ around `Tag`, `TagSet`, `TxFlow`, or QP teardown.
 | `Qp::txStateLock_` | plain mutex (`lockForInlineAckApply`) | a QP's whole transmit state against two writers, when a receiver applies ACKs inline instead of handing them to the sender. Engaged only in that mode | per-QP (coarse) |
 | `SynchronizedCongestionController::box_` | plain mutex in a `folly::Synchronized` | the congestion controller's mutable state | per-QP |
 | `CompletionQueue::admission_` | plain mutex (`std::scoped_lock`) | the completion queue's depth check and placement together, so two queue pairs sharing one queue cannot both take the last entry | per-CompletionQueue |
+| `CompletionQueue::references_` | plain mutex in a `folly::Synchronized` | what holds a completion queue: work-queue references, outstanding async events, retrieved but unacked completion events | per-CompletionQueue |
+| `MetaRoceVerbs::compChannels_` | `folly::Synchronized` r/w lock | each completion channel's queued events, and the completion queues created on it | process-wide |
 | `SharedReceiveQueue::admission_` | plain mutex (`std::lock_guard`) | a monitor over receive depth and waiter selection: the queue's posted receives, its armed limit, and the tags recorded as refused with BRNR. A take tests and removes, or records its refused tag, in one critical section; a post adds its receive and selects the tag it cancels for in one critical section. So two queue pairs cannot both take the last receive, a refusal cannot miss a post that lands beside it, and a post cannot cancel for a tag another take has since served | per-SharedReceiveQueue |
 | `Qp::pendingRnrCancels_` | `folly::Synchronized` with a plain mutex | the rnr cancels a responder has enqueued and the sender has yet to build | per-QP |
 | `SharedReceiveQueue::references_` | `folly::Synchronized` with a plain mutex | the queue pairs holding the queue and the async events it has yet to see acked, which a destroy waits on | per-SharedReceiveQueue |
@@ -69,6 +71,12 @@ Allowed vs forbidden:
 - any datapath lock -> await `arbiterMutex_`  — FORBIDDEN. The arbiter holds it across the build callback, which takes `sndCur` and blocks on `freeSem_`. See the readiness-signal section below.
 - `arbiterMutex_`, `txStateLock_` or `sndCur` -> `SynchronizedCongestionController::box_`  — OK. The controller lock is a leaf.
 - `SynchronizedCongestionController::box_` -> any other lock  — FORBIDDEN. That is what keeps it a leaf.
+
+Completion notification may acquire `compChannels_` while datapath locks remain
+held, after releasing CQ admission. CQ destruction nests `handleToCq_` ->
+`compChannels_` -> `references_`; event retrieval uses the last two. Channel
+operations must not acquire the CQ map or enter the datapath. CQ references
+remain a leaf lock.
 
 ## The WQE-retirement guard (`wqeRetirementMutex_`) — one retirement is not exclusive
 
@@ -179,8 +187,9 @@ lock under it. The holders only go on to enqueue a CQE (`enqueueCqeForWqe`) or
 mark a WQE failing, neither of which returns to `TxFlow`, the arbiter, or the
 Tag map, so `sndCur -> msnSpan_` is the only direction that pair is ever taken
 and it cannot form a cycle. Enqueueing takes `CompletionQueue::admission_` and
-the queue's own synchronization, but no Tag or QP lock. Keep it that way: do not
-signal readiness, take a Tag semaphore, or resolve a Tag while holding it.
+the queue's own synchronization, but no Tag or QP lock; on an armed queue it
+then takes `compChannels_` after releasing `admission_`. Keep it that way: do
+not signal readiness, take a Tag semaphore, or resolve a Tag while holding it.
 
 `inOrderCompletedMsn` and `inOrderRetiredMsn` say different things: a work
 request at or before the first has taken its place in msn order and been

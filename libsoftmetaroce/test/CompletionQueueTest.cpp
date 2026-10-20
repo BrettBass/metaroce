@@ -159,5 +159,52 @@ TEST(CompletionQueueTest, AnEntryTakenPastTheDepthStillOccupiesTheQueue) {
       << "and polling one frees an entry whichever path put it there";
 }
 
+TEST(CompletionQueueTest, ARequestRaisesOneEventForTheNextCompletion) {
+  int raised = 0;
+  CompletionQueue cq{kMaxCqEntries, {}, [&raised] { ++raised; }};
+
+  cq.enqueue(completionFor(0));
+  EXPECT_EQ(raised, 0)
+      << "Notifications are opt-in; completing work must not wake an "
+         "unarmed queue.";
+
+  cq.requestNotification();
+  cq.enqueue(completionFor(1));
+  ASSERT_TRUE(cq.tryEnqueue(completionFor(2)));
+  EXPECT_EQ(raised, 1)
+      << "a notification request arms one event; later completions need a "
+         "fresh one";
+
+  cq.requestNotification();
+  ASSERT_TRUE(cq.tryEnqueue(completionFor(3)));
+  EXPECT_EQ(raised, 2)
+      << "a fresh notification request re-arms the queue on either enqueue "
+         "path";
+}
+
+TEST(CompletionQueueTest, ARefusedCompletionRaisesNoEvent) {
+  int raised = 0;
+  CompletionQueue cq{1, {}, [&raised] { ++raised; }};
+  ASSERT_TRUE(cq.tryEnqueue(completionFor(0)));
+  cq.requestNotification();
+
+  ASSERT_FALSE(cq.tryEnqueue(completionFor(1)));
+  EXPECT_EQ(raised, 0)
+      << "a refused completion is not in the queue, so it raises no event";
+}
+
+TEST(CompletionQueueTest, AQueueHoldsItsEventsUntilEachIsAcked) {
+  CompletionQueue cq;
+  cq.takeRetrievedCompletionEvent();
+  cq.takeRetrievedCompletionEvent();
+
+  cq.releaseRetrievedCompletionEvents(1);
+  EXPECT_TRUE(cq.hasUnackedCompletionEvents())
+      << "The client still holds the queue through the unacked event.";
+  cq.releaseRetrievedCompletionEvents(1);
+  EXPECT_FALSE(cq.hasUnackedCompletionEvents())
+      << "acking every event taken releases the queue for destroy";
+}
+
 } // namespace
 } // namespace libsoftmetaroce

@@ -686,6 +686,17 @@ static_assert(
     std::is_standard_layout_v<LsmrContext>,
     "LsmrContext must be standard-layout for the ibv_context <-> LsmrContext "
     "pointer interconvertibility below to be well-defined");
+
+// An ibv_comp_channel with the write end of the pipe whose read end the client
+// reads as `fd`.
+struct LsmrCompChannel {
+  struct ibv_comp_channel ibvChannel;
+  int writeFd;
+};
+static_assert(
+    std::is_standard_layout_v<LsmrCompChannel> &&
+        offsetof(LsmrCompChannel, ibvChannel) == 0,
+    "an ibv_comp_channel* lsmr hands out must convert back to its wrapper");
 static_assert(
     offsetof(LsmrContext, ibvContext) == 0,
     "ibv_context must be the first member so an ibv_context* aliases the "
@@ -699,6 +710,18 @@ void logDroppedAsyncEvent(uint64_t contextId) noexcept {
         << " failed to queue an async event; dropping the event";
   } catch (...) {
   }
+}
+
+// Writes a wakeup byte to `channel`. Returns false only where no byte may be
+// waiting: a full pipe already holds bytes that wake a reader.
+// Caller holds `compChannels_` for writing.
+bool wakeCompChannel(const LsmrCompChannel& channel) {
+  const char raised = 1;
+  ssize_t wrote = 0;
+  do {
+    wrote = write(channel.writeFd, &raised, sizeof(raised));
+  } while (wrote < 0 && errno == EINTR);
+  return wrote == sizeof(raised) || (wrote < 0 && errno == EAGAIN);
 }
 } // namespace
 
@@ -728,7 +751,7 @@ MetaRoceVerbs::ibv_open_device(struct ibv_device* device) {
       ibv_context_ops(),
       0 /*cmd_fd*/,
       pipeFds[0] /*async_fd*/,
-      0 /*num_comp_vectors*/,
+      kCompletionVectorCount /*num_comp_vectors*/,
       pthread_mutex_t(),
       nullptr /*abi_compat*/};
   try {
@@ -1061,15 +1084,163 @@ int MetaRoceVerbs::ibv_dealloc_pd(struct ibv_pd* pd) {
   return 0;
 }
 
-// We don't support use event, so return nullptr for completion channel
 struct ibv_comp_channel* FOLLY_NULLABLE
-MetaRoceVerbs::ibv_create_comp_channel(struct ibv_context* /*context*/) {
-  return nullSettingErrno(ENOSYS);
+MetaRoceVerbs::ibv_create_comp_channel(struct ibv_context* context) {
+  if (context == nullptr) {
+    return nullSettingErrno(EINVAL);
+  }
+  // The read end blocks, as ibv_get_cq_event(3) does on a fresh channel; the
+  // write end does not, so a raise never waits on a client.
+  int pipeFds[2];
+  if (pipe2(pipeFds, O_CLOEXEC) < 0) {
+    return nullptr;
+  }
+  auto closePipe = folly::makeGuard([&pipeFds] {
+    const int saved = errno;
+    close(pipeFds[0]);
+    close(pipeFds[1]);
+    errno = saved;
+  });
+  if (fcntl(pipeFds[1], F_SETFL, O_NONBLOCK) < 0) {
+    return nullptr;
+  }
+  auto* wrapper =
+      static_cast<LsmrCompChannel*>(malloc(sizeof(LsmrCompChannel)));
+  if (wrapper == nullptr) {
+    return nullSettingErrno(ENOMEM);
+  }
+  wrapper->ibvChannel = {context, pipeFds[0], 0 /*refcnt*/};
+  wrapper->writeFd = pipeFds[1];
+  try {
+    compChannels_.wlock()->emplace(&wrapper->ibvChannel, CompChannelState{});
+  } catch (...) {
+    free(wrapper);
+    return nullSettingErrno(ENOMEM);
+  }
+  closePipe.dismiss();
+  return &wrapper->ibvChannel;
 }
 
-int MetaRoceVerbs::ibv_destroy_comp_channel(
-    struct ibv_comp_channel* /*channel*/) {
+int MetaRoceVerbs::ibv_destroy_comp_channel(struct ibv_comp_channel* channel) {
+  if (channel == nullptr) {
+    return withErrno(EINVAL);
+  }
+  {
+    auto lockedChannels = compChannels_.wlock();
+    const auto it = lockedChannels->find(channel);
+    if (it == lockedChannels->end()) {
+      return withErrno(ENOENT);
+    }
+    if (it->second.completionQueues > 0) {
+      return withErrno(EBUSY);
+    }
+    lockedChannels->erase(it);
+  }
+  auto* wrapper = reinterpret_cast<LsmrCompChannel*>(channel);
+  close(wrapper->ibvChannel.fd);
+  close(wrapper->writeFd);
+  free(wrapper);
   return 0;
+}
+
+void MetaRoceVerbs::raiseCompletionEvent(struct ibv_cq* cq) {
+  try {
+    auto lockedChannels = compChannels_.wlock();
+    const auto it = lockedChannels->find(cq->channel);
+    if (it == lockedChannels->end()) {
+      return;
+    }
+    auto& events = it->second.events;
+    const bool wasEmpty = events.empty();
+    events.push_back(cq);
+    // Events already waiting have a byte written for them, or a reader that
+    // took it and replaces it under this lock.
+    if (wasEmpty &&
+        !wakeCompChannel(*reinterpret_cast<LsmrCompChannel*>(cq->channel))) {
+      LOG_FIRST_N(ERROR, 20)
+          << "completion channel " << cq->channel
+          << " could not be woken; its event waits for the next reader";
+    }
+  } catch (...) {
+    // Only the push can throw. Linux uverbs also drops a notification it cannot
+    // allocate; the queue stays disarmed until the client re-arms it.
+    LOG_FIRST_N(ERROR, 20) << "a completion event could not be queued";
+  }
+}
+
+int MetaRoceVerbs::ibv_req_notify_cq(
+    struct ibv_cq* cq,
+    int /*solicited_only*/) {
+  // MetaRoCE carries no solicited bit, so a solicited-only request notifies on
+  // any completion: a spurious wakeup is safe where a missed one is not.
+  if (cq == nullptr) {
+    return withErrno(EINVAL);
+  }
+  const auto lockedCqs = handleToCq_.rlock();
+  const auto it = lockedCqs->find(cq->handle);
+  if (it == lockedCqs->end() || it->second == nullptr) {
+    return withErrno(ENOENT);
+  }
+  if (cq->channel == nullptr) {
+    return withErrno(EINVAL);
+  }
+  it->second->requestNotification();
+  return 0;
+}
+
+int MetaRoceVerbs::ibv_get_cq_event(
+    struct ibv_comp_channel* channel,
+    struct ibv_cq** cq,
+    void** cq_context) {
+  if (channel == nullptr || cq == nullptr || cq_context == nullptr) {
+    return minusOneSettingErrno(EINVAL);
+  }
+  if (!compChannels_.rlock()->contains(channel)) {
+    return minusOneSettingErrno(ENOENT);
+  }
+  struct ibv_cq* taken = nullptr;
+  // ibv_destroy_cq removes a queue's events but leaves the channel's wakeup
+  // byte; reading it, the loop waits for the next event, as Linux uverbs does.
+  do {
+    char raised = 0;
+    const ssize_t got = read(channel->fd, &raised, sizeof(raised));
+    if (got < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return -1;
+    }
+    if (got == 0) {
+      return minusOneSettingErrno(EIO);
+    }
+    auto lockedChannels = compChannels_.wlock();
+    const auto it = lockedChannels->find(channel);
+    if (it == lockedChannels->end()) {
+      return minusOneSettingErrno(ENOENT);
+    }
+    if (!it->second.events.empty()) {
+      taken = it->second.events.front();
+      it->second.events.pop_front();
+      // The channel lock also covers `ibv_destroy_cq`'s unacked-event check.
+      completionQueueOf(*taken).takeRetrievedCompletionEvent();
+      if (!it->second.events.empty() &&
+          !wakeCompChannel(*reinterpret_cast<LsmrCompChannel*>(channel))) {
+        LOG_FIRST_N(ERROR, 20)
+            << "completion channel " << channel
+            << " could not be woken for its remaining events";
+      }
+    }
+  } while (taken == nullptr);
+  *cq = taken;
+  *cq_context = taken->cq_context;
+  return 0;
+}
+
+void MetaRoceVerbs::ibv_ack_cq_events(struct ibv_cq* cq, unsigned int nevents) {
+  if (cq == nullptr || nevents == 0) {
+    return;
+  }
+  completionQueueOf(*cq).releaseRetrievedCompletionEvents(nevents);
 }
 
 namespace {
@@ -1127,10 +1298,32 @@ struct ibv_cq* FOLLY_NULLABLE MetaRoceVerbs::ibv_create_cq(
     int sizeOfQueue,
     void* cq_context,
     struct ibv_comp_channel* channel,
-    int /*comp_vector*/) {
+    int comp_vector) {
   if (sizeOfQueue <= 0 || static_cast<uint32_t>(sizeOfQueue) > kMaxCqEntries) {
     return nullSettingErrno(EINVAL);
   }
+  if (comp_vector < 0 || comp_vector >= kCompletionVectorCount) {
+    return nullSettingErrno(EINVAL);
+  }
+  // Counted before the queue exists, so a destroy of the channel racing this
+  // create finds it in use.
+  if (channel != nullptr) {
+    auto lockedChannels = compChannels_.wlock();
+    const auto it = lockedChannels->find(channel);
+    if (it == lockedChannels->end()) {
+      return nullSettingErrno(EINVAL);
+    }
+    ++it->second.completionQueues;
+  }
+  auto releaseChannel = folly::makeGuard([this, channel] {
+    if (channel != nullptr) {
+      auto lockedChannels = compChannels_.wlock();
+      const auto it = lockedChannels->find(channel);
+      if (it != lockedChannels->end()) {
+        --it->second.completionQueues;
+      }
+    }
+  });
   auto* wrapper = static_cast<LsmrCq*>(malloc(sizeof(LsmrCq)));
   if (wrapper == nullptr) {
     return nullSettingErrno(ENOMEM);
@@ -1143,6 +1336,8 @@ struct ibv_cq* FOLLY_NULLABLE MetaRoceVerbs::ibv_create_cq(
   // second (read-locked) lookup. handleToCq_ remains the owner.
   std::optional<AllocatedCq> allocated;
   try {
+    // Safe to capture: each QP holds a reference on cq until its teardown stops
+    // completing into it, and ibv_destroy_cq returns EBUSY until then.
     allocated = allocateCompletionQueue(
         static_cast<uint32_t>(sizeOfQueue),
         [this,
@@ -1158,7 +1353,11 @@ struct ibv_cq* FOLLY_NULLABLE MetaRoceVerbs::ibv_create_cq(
           if (!raiseAsyncEvent(context, contextId, event)) {
             queue.releaseEventReferences(1);
           }
-        });
+        },
+        channel == nullptr
+            ? std::function<void()>{}
+            : std::function<void()>{
+                  [this, cq = &wrapper->ibvCq] { raiseCompletionEvent(cq); }});
   } catch (const std::bad_alloc&) {
     return nullSettingErrno(ENOMEM);
   } catch (...) {
@@ -1180,6 +1379,7 @@ struct ibv_cq* FOLLY_NULLABLE MetaRoceVerbs::ibv_create_cq(
       .comp_events_completed = 0,
       .async_events_completed = 0};
   freeWrapper.dismiss();
+  releaseChannel.dismiss();
   return &wrapper->ibvCq;
 }
 
@@ -1215,6 +1415,20 @@ int MetaRoceVerbs::ibv_destroy_cq(struct ibv_cq* cq) {
     // A completion queue a work queue can still report into is kept.
     if (it->second->isReferenced()) {
       return withErrno(EBUSY);
+    }
+    if (cq->channel != nullptr) {
+      auto lockedChannels = compChannels_.wlock();
+      // A client holding an event it has not acked keeps the queue.
+      if (it->second->hasUnackedCompletionEvents()) {
+        return withErrno(EBUSY);
+      }
+      const auto channelIt = lockedChannels->find(cq->channel);
+      if (channelIt != lockedChannels->end()) {
+        auto& events = channelIt->second.events;
+        events.erase(
+            std::remove(events.begin(), events.end(), cq), events.end());
+        --channelIt->second.completionQueues;
+      }
     }
     queue = std::move(it->second);
     lockedCqs->erase(it);

@@ -74,6 +74,7 @@ inline constexpr uint8_t kPhysicalPortCount = 1;
 inline constexpr uint32_t kMaxMemoryRegions = 16777216;
 inline constexpr uint32_t kMaxCqEntries = 32768;
 inline constexpr uint32_t kMaxCompletionQueues = 1048576;
+inline constexpr int kCompletionVectorCount = 1;
 inline constexpr uint32_t kMaxQueuePairs = 1048576;
 inline constexpr uint32_t kMaxQpWorkRequests = 32768;
 inline constexpr uint32_t kMaxSgesPerWorkRequest = 8;
