@@ -558,9 +558,7 @@ TEST_F(TagSetTest, PostingToATagInErrorFlushesWithoutCountingItsPosns) {
   auto* readySignal = arbiter.addQp(
       /*qpNum=*/0, []() { return std::unique_ptr<EgressPacket>(); });
   tagSet_->postWqe(
-      1,
-      std::make_unique<SendWqe>(
-          kWorkReqId, oneSge(buffer_->data(), 2 * kMtu), kMtu));
+      1, std::make_unique<SendWqe>(kWorkReqId, oneSge(*buffer_), kMtu));
 
   // The completion is what says the post was processed, so the test waits for
   // it and then cancels the loop.
@@ -691,8 +689,7 @@ TEST_F(TagSetTest, TheSendersVisitFailsTheWqesOfATagInError) {
   tagSet_->add(1, cqs_[0].get(), &mockQp);
   auto tag = tagSet_->at(1);
 
-  auto sendWqe = std::make_unique<SendWqe>(
-      kWorkReqId, oneSge(buffer_->data(), 2 * kMtu), kMtu);
+  auto sendWqe = std::make_unique<SendWqe>(kWorkReqId, oneSge(*buffer_), kMtu);
   Wqe* postedWqe = sendWqe.get();
   postToTag(*tag, std::move(sendWqe), kMtu);
   tagSet_->addUnsentPosns(postedWqe->getNumPosn());
