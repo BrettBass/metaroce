@@ -2154,6 +2154,46 @@ TEST_F(VerbsTest, PostZeroLengthSendWithNoSgeIsAccepted) {
       << "no bad_wr should be reported on a successful post";
 }
 
+TEST_F(VerbsTest, AMessageLongerThanItsQpsMtuCarriesIsRefused) {
+  struct ibv_qp* const ibvqp = setup_qp(
+      verbs_,
+      cq_,
+      pd_,
+      folly::IPAddressV6("fc00::1"),
+      kDestQpNum,
+      IBV_MTU_256,
+      /*sqSigAll=*/true,
+      /*maxRdAtomic=*/1);
+  ASSERT_NE(ibvqp, nullptr);
+  constexpr uint32_t kLongest =
+      OversizeWqeException::kMaxPacketsPerMessage * 256;
+
+  struct ibv_sge sge{.addr = 0x1000, .length = kLongest + 1};
+  for (const ibv_wr_opcode opcode : {IBV_WR_SEND, IBV_WR_RDMA_READ}) {
+    struct ibv_send_wr wr{
+        .wr_id = 1,
+        .sg_list = &sge,
+        .num_sge = 1,
+        .opcode = opcode,
+        .wr = {.rdma = {.remote_addr = 0x1000, .rkey = 1}}};
+    struct ibv_send_wr* badWr = nullptr;
+    EXPECT_EQ(verbs_.ibv_post_send(ibvqp, &wr, &badWr), EINVAL)
+        << "opcode " << opcode
+        << " needs more than kMaxPacketsPerMessage packets at this mtu";
+    EXPECT_EQ(badWr, &wr)
+        << "a refusal points at the work request it stopped at";
+  }
+
+  sge.length = kLongest;
+  struct ibv_send_wr send{
+      .wr_id = 2, .sg_list = &sge, .num_sge = 1, .opcode = IBV_WR_SEND};
+  struct ibv_send_wr* badWr = nullptr;
+  EXPECT_EQ(verbs_.ibv_post_send(ibvqp, &send, &badWr), 0)
+      << "a message of exactly the longest length is posted";
+
+  EXPECT_EQ(verbs_.ibv_destroy_qp(ibvqp), 0);
+}
+
 TEST_F(VerbsTest, PostSendWithMoreSgesThanTheDeviceReportsIsRefused) {
   struct ibv_qp* ibvqp = fixtureQp();
   ASSERT_NE(ibvqp, nullptr);
@@ -4462,6 +4502,18 @@ class MetaRoceVerbsGidFilterTest : public ::testing::Test {
 };
 
 } // namespace
+
+TEST(MetaRoceVerbsTest, ThePortAdvertisesTheLongestMessageItsMtuCarries) {
+  MetaRoceVerbs verbs(mockUDPSocketMaker);
+
+  ibv_port_attr port_attr{};
+  ASSERT_EQ(verbs.ibv_query_port(nullptr, 1, &port_attr), 0)
+      << "precondition: the port query succeeds";
+  EXPECT_EQ(port_attr.max_msg_sz, 65536u * 8192u)
+      << "a message carries at most 2^16 packets of the port's 8192-byte mtu";
+  EXPECT_GT(port_attr.max_msg_sz, 0x1000u)
+      << "rdma-core's tests/test_device.py requires more than one page";
+}
 
 TEST(MetaRoceVerbsTest, AGidIndexPastTheTableReportsThroughErrno) {
   MetaRoceVerbs verbs(mockUDPSocketMaker);

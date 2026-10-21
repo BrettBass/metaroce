@@ -38,6 +38,7 @@
 #include <libsoftmetaroce/SequenceNumbers.h>
 #include <libsoftmetaroce/SgeList.h>
 #include <libsoftmetaroce/WireProfiles.h>
+#include <libsoftmetaroce/Wqe.h>
 #include <libsoftmetaroce/congestion_control/Flags.h>
 #include <libsoftmetaroce/modifier/CorruptModifier.h>
 #include <libsoftmetaroce/modifier/DuplicateModifier.h>
@@ -68,6 +69,16 @@
 #ifndef IBV_MTU_8192
 constexpr ibv_mtu IBV_MTU_8192 = static_cast<ibv_mtu>(6);
 #endif
+
+namespace {
+
+constexpr uint64_t maxMessageBytes(uint32_t mtuBytes) {
+  return uint64_t{
+             libsoftmetaroce::OversizeWqeException::kMaxPacketsPerMessage} *
+      mtuBytes;
+}
+
+} // namespace
 
 DEFINE_string(
     libsoftmetaroce_modifier_config,
@@ -964,6 +975,8 @@ int MetaRoceVerbs::ibv_query_port(
   port_attr->state = IBV_PORT_ACTIVE;
   port_attr->max_mtu = IBV_MTU_8192;
   port_attr->active_mtu = IBV_MTU_8192;
+  port_attr->max_msg_sz = static_cast<uint32_t>(
+      maxMessageBytes(1u << (IBV_MTU_8192 + kMtuEnumShift)));
   port_attr->link_layer = IBV_LINK_LAYER_ETHERNET;
   // Fixed verbs width; the GID count always fits.
   // NOLINTNEXTLINE(clang-diagnostic-shorten-64-to-32)
@@ -2495,6 +2508,10 @@ int MetaRoceVerbs::postSendWr(
   }
   const std::span<const struct ibv_sge> sges = sgeList->sges;
   const uint32_t length = sgeList->totalLength;
+  // A path mtu below the port's mtu carries fewer bytes than max_msg_sz.
+  if (length > maxMessageBytes(qp.getMtu())) {
+    return EINVAL;
+  }
   const bool isInline = wr.send_flags & IBV_SEND_INLINE;
   if (isInline) {
     // Inline data is copied into the WQE, so it applies only to operations that
