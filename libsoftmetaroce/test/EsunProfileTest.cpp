@@ -37,6 +37,7 @@
 #include <vector>
 
 DECLARE_string(libsoftmetaroce_esun_gids);
+DECLARE_uint32(libsoftmetaroce_esun_ttl);
 
 namespace libsoftmetaroce {
 namespace {
@@ -132,6 +133,19 @@ TEST(EsunProfileTest, BuildsMetaRoceOverEsunProfile) {
       dynamic_cast<EsunEncapsulation*>(profile.makeEncapsulation(entry).get()),
       nullptr)
       << "the profile must build ESUN framing";
+}
+
+TEST(EsunProfileTest, EncapsulationUsesTtlFlag) {
+  const gflags::FlagSaver flagSaver;
+  FLAGS_libsoftmetaroce_esun_ttl = 3;
+  const auto encapsulation = makeEsunProfile().makeEncapsulation(
+      buildGidEntry(linkLocalCandidate(), kGidTypeEsun));
+  const auto* esun = dynamic_cast<EsunEncapsulation*>(encapsulation.get());
+  ASSERT_NE(esun, nullptr);
+
+  EXPECT_EQ(esun->header().ttl(), 3)
+      << "operators rely on the flag to bound how many switches a frame may "
+         "cross";
 }
 
 TEST(EsunProfileTest, MtuIncludesEsunFraming) {

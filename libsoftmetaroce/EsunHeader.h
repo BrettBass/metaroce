@@ -37,6 +37,7 @@ class EsunHeader {
  public:
   static constexpr size_t kSizeBytes = 4;
   static constexpr uint8_t kReservedMask = 0x3;
+  static constexpr uint8_t kDefaultEsunTtl = 7;
 
   struct Fields {
     uint8_t revision{0};
@@ -44,7 +45,7 @@ class EsunHeader {
     uint8_t classOfService{0};
     uint8_t ecn{0};
     uint16_t flowLabel{0};
-    uint8_t ttl{1}; // single hop by default
+    uint8_t ttl{kDefaultEsunTtl};
     uint8_t userDefined{0};
   };
 

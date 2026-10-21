@@ -43,6 +43,16 @@ DEFINE_string(
     "Comma-separated local IPv6 link-local addresses with embedded MACs to "
     "classify as MetaRoCE-over-ESUN GIDs. Empty disables classification.");
 
+DEFINE_uint32(
+    libsoftmetaroce_esun_ttl,
+    libsoftmetaroce::EsunHeader::Fields{}.ttl,
+    "Initial TTL for ESUN packets (1-15).");
+
+static bool validateEsunTtl(const char* /*name*/, uint32_t value) {
+  return value >= 1 && value <= 15;
+}
+DEFINE_validator(libsoftmetaroce_esun_ttl, &validateEsunTtl);
+
 namespace libsoftmetaroce {
 namespace {
 
@@ -51,7 +61,11 @@ std::unique_ptr<Encapsulation> makeEsunEncapsulation(
   const auto address = folly::IPAddressV6::fromBinary(
       folly::ByteRange(entry.gid.raw, sizeof(entry.gid.raw)));
   return std::make_unique<EsunEncapsulation>(
-      RawEncapsulation::macFromLinkLocal(address), folly::MacAddress());
+      RawEncapsulation::macFromLinkLocal(address),
+      folly::MacAddress(),
+      EsunHeader(
+          EsunHeader::Fields{
+              .ttl = static_cast<uint8_t>(FLAGS_libsoftmetaroce_esun_ttl)}));
 }
 
 } // namespace

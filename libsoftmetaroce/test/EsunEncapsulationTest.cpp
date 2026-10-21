@@ -91,8 +91,8 @@ TEST(EsunHeaderTest, DefaultsAreSafeAndConsistent) {
       << "the default header should not report congestion";
   EXPECT_EQ(defaultHeader.flowLabel(), 0)
       << "the default header should carry no flow label";
-  EXPECT_EQ(defaultHeader.ttl(), 1)
-      << "the default header should be safe for a directly attached peer";
+  EXPECT_EQ(defaultHeader.ttl(), EsunHeader::kDefaultEsunTtl)
+      << "the default header should provide the default ESUN hop budget";
   EXPECT_EQ(defaultHeader.userDefined(), 0)
       << "the default header should leave user-defined bits unset";
   EXPECT_EQ(defaultHeader.reserved(), 0)
