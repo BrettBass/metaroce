@@ -1154,6 +1154,10 @@ void TxFlow::processAckPacket(const AckHeader& ack, uint32_t nowNs) {
   updateRtt(ack.getTimestamp(), nowNs);
   if (ack.getTimestamp() != 0) {
     getQp().updateQpRtt(rttNs);
+    VLOG(1) << "packet_rtt qp=" << qp_.getLocalQpNum() << " flow_id=" << flowId_
+            << " socket_id=" << socketId_ << " cfsn=" << ack.getCumulativeFsn()
+            << " max_rcvd_fsn=" << ack.getMaxRcvdFsn() << " rtt_ns=" << rttNs
+            << " send_ts_ns=" << ack.getTimestamp() << " now_ns=" << nowNs;
   }
   CongestionController& cc =
       *CHECK_NOTNULL(getQp().congestionController_.get());
