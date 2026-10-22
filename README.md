@@ -67,6 +67,11 @@ cmake -S . -B build-nix -G Ninja && ninja -C build-nix
 The Nix-built binary links against `/nix/store`, so it is meant to run
 on the machine that built it (or one with the same closure).
 
+> [NOTE] The dependency versions come from the nixpkgs revision pinned in
+> `flake.lock`, not from the versions pinned by `getdeps.py`, so they are
+> not exactly the same. The Nix build is expected to work for most uses,
+> but `getdeps.py` remains the reference build.
+
 ## License
 
 MetaRoCE is Apache-2.0 licensed; see [LICENSE](LICENSE). Contributions
